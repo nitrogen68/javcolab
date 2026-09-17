@@ -536,14 +536,24 @@ def get_thumbnail(name: str):
     path = f"data/thumbs/{name}"
     b64, _ = gh_get(path)
     if not b64:
-        # coba fallback "global" (tanpa nama)
         return StreamingResponse(iter([]), status_code=404, media_type="text/plain")
     data = base64.b64decode(b64)
     return StreamingResponse(iter([data]), media_type="image/jpeg")
 
 
 # ------------------------------------------------------------------ UI
-@app.get("/")
+# Vercel maps api/index.py to /api. Keep the UI at both /api and / so
+# a root rewrite can safely render HTML instead of FastAPI's JSON 404.
+def _ui_html():
+    return get_full_ui(APP_VERSION, get_modals_html())
+
+
+@app.get("/api", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/api/", response_class=HTMLResponse, include_in_schema=False)
+def serve_api_ui():
+    return HTMLResponse(content=_ui_html())
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def serve_ui():
-    html = get_full_ui(APP_VERSION, get_modals_html())
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=_ui_html())
