@@ -1,12 +1,10 @@
 name: Puppeter Worker
 
 on:
-  # Trigger otomatis dari api/index.py melalui repository_dispatch
   repository_dispatch:
     types:
       - jav-task
 
-  # Tetap bisa dijalankan manual untuk testing
   workflow_dispatch:
     inputs:
       task_id:
@@ -24,17 +22,13 @@ jobs:
     timeout-minutes: 60
 
     env:
-      # repository_dispatch: github.event.client_payload.task_id
-      # workflow_dispatch: inputs.task_id
       TASK_ID: ${{ github.event.client_payload.task_id || inputs.task_id }}
-
       API_BASE: ${{ secrets.API_BASE }}
       WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       GH_BRANCH: main
       GDRIVE_FOLDER: ${{ secrets.GDRIVE_FOLDER }}
-
       CI: "true"
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright
 
@@ -67,11 +61,11 @@ jobs:
         run: |
           python - <<'PY'
           import sys
-          import playwright
+          import importlib.metadata
           from playwright.sync_api import sync_playwright
 
           print("Python:", sys.version)
-          print("Playwright:", playwright.__version__)
+          print("Playwright:", importlib.metadata.version("playwright"))
 
           with sync_playwright() as p:
               browser = p.chromium.launch(
