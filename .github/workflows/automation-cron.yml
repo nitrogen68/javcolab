@@ -1,0 +1,29 @@
+name: Database Automation Scheduler
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  automation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Run due automations
+        env:
+          API_BASE: ${{ secrets.API_BASE }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+        run: |
+          set -e
+          test -n "$API_BASE"
+          test -n "$WORKER_SECRET"
+          curl --fail-with-body --silent --show-error \
+            -X POST "$API_BASE/api/automation/run" \
+            -H "X-Worker-Secret: $WORKER_SECRET" \
+            -H "Content-Type: application/json" \
+            -d '{}'
+          echo
