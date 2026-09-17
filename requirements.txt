@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn>=0.29
+requests>=2.31
+cryptography>=42.0
+google-auth>=2.26
+google-api-python-client>=2.120
+google-auth-httplib2>=0.2.0

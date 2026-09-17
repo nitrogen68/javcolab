@@ -1,0 +1,7 @@
+requests>=2.31
+beautifulsoup4>=4.12
+playwright>=1.40
+deep-translator>=1.11.4
+google-auth>=2.26
+google-api-python-client>=2.120
+google-auth-httplib2>=0.2.0
