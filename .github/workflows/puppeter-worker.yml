@@ -1,6 +1,12 @@
 name: Puppeter Worker
 
 on:
+  # Trigger otomatis dari api/index.py melalui repository_dispatch
+  repository_dispatch:
+    types:
+      - jav-task
+
+  # Tetap bisa dijalankan manual untuk testing
   workflow_dispatch:
     inputs:
       task_id:
@@ -11,10 +17,6 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: puppeter-worker-${{ inputs.task_id }}
-  cancel-in-progress: false
-
 jobs:
   worker:
     name: Run Puppeter / Playwright
@@ -22,18 +24,21 @@ jobs:
     timeout-minutes: 60
 
     env:
-      TASK_ID: ${{ inputs.task_id }}
+      # repository_dispatch: github.event.client_payload.task_id
+      # workflow_dispatch: inputs.task_id
+      TASK_ID: ${{ github.event.client_payload.task_id || inputs.task_id }}
+
       API_BASE: ${{ secrets.API_BASE }}
       WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       GH_BRANCH: main
       GDRIVE_FOLDER: ${{ secrets.GDRIVE_FOLDER }}
+
       CI: "true"
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
@@ -52,7 +57,7 @@ jobs:
 
       - name: Install worker dependencies
         run: |
-          pip install -r worker/requirements.txt
+          python -m pip install -r worker/requirements.txt
 
       - name: Install Playwright Chromium
         run: |
@@ -80,10 +85,7 @@ jobs:
               )
 
               page = browser.new_page()
-              page.goto(
-                  "https://example.com",
-                  wait_until="domcontentloaded"
-              )
+              page.goto("https://example.com", wait_until="domcontentloaded")
 
               print("Browser:", browser.version)
               print("Title:", page.title())
@@ -93,22 +95,27 @@ jobs:
           print("Playwright Chromium OK")
           PY
 
-      - name: Verify worker
+      - name: Validate worker configuration
         run: |
+          test -n "$TASK_ID" || (echo "TASK_ID kosong" && exit 1)
+          test -n "$API_BASE" || (echo "API_BASE kosong" && exit 1)
+          test -n "$WORKER_SECRET" || (echo "WORKER_SECRET kosong" && exit 1)
           test -f worker/main.py
           test -f worker/requirements.txt
+          echo "TASK_ID=$TASK_ID"
+          echo "API_BASE=$API_BASE"
           echo "Worker files:"
           ls -lah worker/
 
       - name: Run Puppeter / Playwright
         run: |
-          python worker/main.py
+          python worker/main.py "$TASK_ID"
 
       - name: Upload worker diagnostics
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: puppeter-worker-${{ inputs.task_id }}
+          name: puppeter-worker-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             worker/
             .playwright/
