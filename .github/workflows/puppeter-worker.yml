@@ -19,45 +19,26 @@ jobs:
   worker:
     name: Run Puppeter / Playwright
     runs-on: ubuntu-latest
-
     timeout-minutes: 60
 
     env:
       TASK_ID: ${{ inputs.task_id }}
-
-      # API Vercel
       API_BASE: ${{ secrets.API_BASE }}
-
-      # Secret komunikasi Worker <-> API
       WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
-
-      # GitHub API
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       GH_BRANCH: main
-
-      # Google Drive
       GDRIVE_FOLDER: ${{ secrets.GDRIVE_FOLDER }}
-
-      # CI indicator
       CI: "true"
-
-      # Playwright
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright
 
     steps:
 
-      # --------------------------------------------------
-      # 1. Checkout repository
-      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      # --------------------------------------------------
-      # 2. Setup Python
-      # --------------------------------------------------
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
@@ -65,30 +46,18 @@ jobs:
           cache: pip
           cache-dependency-path: worker/requirements.txt
 
-      # --------------------------------------------------
-      # 3. Upgrade pip
-      # --------------------------------------------------
       - name: Upgrade pip
         run: |
           python -m pip install --upgrade pip setuptools wheel
 
-      # --------------------------------------------------
-      # 4. Install Python dependencies
-      # --------------------------------------------------
       - name: Install worker dependencies
         run: |
           pip install -r worker/requirements.txt
 
-      # --------------------------------------------------
-      # 5. Install Chromium + Linux dependencies
-      # --------------------------------------------------
       - name: Install Playwright Chromium
         run: |
           python -m playwright install --with-deps chromium
 
-      # --------------------------------------------------
-      # 6. Verify Playwright installation
-      # --------------------------------------------------
       - name: Verify Playwright
         run: |
           python - <<'PY'
@@ -111,7 +80,10 @@ jobs:
               )
 
               page = browser.new_page()
-              page.goto("https://example.com", wait_until="domcontentloaded")
+              page.goto(
+                  "https://example.com",
+                  wait_until="domcontentloaded"
+              )
 
               print("Browser:", browser.version)
               print("Title:", page.title())
@@ -121,30 +93,20 @@ jobs:
           print("Playwright Chromium OK")
           PY
 
-      # --------------------------------------------------
-      # 7. Check worker files
-      # --------------------------------------------------
       - name: Verify worker
         run: |
           test -f worker/main.py
           test -f worker/requirements.txt
-
-          echo "Worker:"
+          echo "Worker files:"
           ls -lah worker/
 
-      # --------------------------------------------------
-      # 8. Run worker
-      # --------------------------------------------------
-      - name: Run Puppeter worker
+      - name: Run Puppeter / Playwright
         run: |
           python worker/main.py
 
-      # --------------------------------------------------
-      # 9. Upload diagnostic logs if failed
-      # --------------------------------------------------
       - name: Upload worker diagnostics
         if: failure()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: puppeter-worker-${{ inputs.task_id }}
           path: |
