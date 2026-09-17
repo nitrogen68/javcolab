@@ -33,220 +33,155 @@ def db():
 
 
 def _json(v: Any):
-    if isinstance(v, datetime):
-        return v.isoformat()
+    if isinstance(v, datetime): return v.isoformat()
     return v
 
 
 def init_db():
     with db() as conn:
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS tasks (
-            task_id TEXT PRIMARY KEY,
-            code TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'queued',
-            progress INTEGER NOT NULL DEFAULT 0,
-            stage TEXT NOT NULL DEFAULT 'Queued',
-            message TEXT NOT NULL DEFAULT '',
-            size_bytes BIGINT NOT NULL DEFAULT 0,
-            speed_kbps DOUBLE PRECISION NOT NULL DEFAULT 0,
-            result JSONB,
-            error TEXT,
-            session_token TEXT,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            completed_at TIMESTAMPTZ
-        )
+        conn.execute("""CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY, code TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued',
+            progress INTEGER NOT NULL DEFAULT 0, stage TEXT NOT NULL DEFAULT 'Queued',
+            message TEXT NOT NULL DEFAULT '', size_bytes BIGINT NOT NULL DEFAULT 0,
+            speed_kbps DOUBLE PRECISION NOT NULL DEFAULT 0, result JSONB, meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+            error TEXT, session_token TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), completed_at TIMESTAMPTZ)
         """)
+        conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS meta JSONB NOT NULL DEFAULT '{}'::jsonb")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS task_logs (
-            id BIGSERIAL PRIMARY KEY,
-            task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
-            level TEXT NOT NULL DEFAULT 'info',
-            message TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
+        conn.execute("""CREATE TABLE IF NOT EXISTS task_logs (
+            id BIGSERIAL PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            level TEXT NOT NULL DEFAULT 'info', message TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_task_logs_task ON task_logs(task_id, id)")
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS histories (
-            id BIGSERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            email TEXT NOT NULL DEFAULT '',
-            session_token TEXT NOT NULL DEFAULT '',
-            drive_file_id TEXT,
-            thumb TEXT,
-            data JSONB NOT NULL DEFAULT '{}'::jsonb,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_task_logs_task ON task_logs(task_id,id)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS histories (
+            id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL DEFAULT '',
+            session_token TEXT NOT NULL DEFAULT '', drive_file_id TEXT, thumb TEXT,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_histories_email ON histories(email, created_at DESC)")
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            session_token TEXT PRIMARY KEY,
-            email TEXT NOT NULL DEFAULT '',
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_histories_email ON histories(email,created_at DESC)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS sessions (
+            session_token TEXT PRIMARY KEY, email TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())
         """)
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS automations (
-            id BIGSERIAL PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE,
-            enabled BOOLEAN NOT NULL DEFAULT TRUE,
-            interval_minutes INTEGER NOT NULL DEFAULT 60,
-            action TEXT NOT NULL DEFAULT 'worker',
-            config JSONB NOT NULL DEFAULT '{}'::jsonb,
-            last_run_at TIMESTAMPTZ,
-            next_run_at TIMESTAMPTZ,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
+        conn.execute("""CREATE TABLE IF NOT EXISTS automations (
+            id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE, enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            interval_minutes INTEGER NOT NULL DEFAULT 60, action TEXT NOT NULL DEFAULT 'worker',
+            config JSONB NOT NULL DEFAULT '{}'::jsonb, last_run_at TIMESTAMPTZ,
+            next_run_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())
         """)
-        # Backward-compatible migration if an earlier automations table exists.
         conn.execute("ALTER TABLE automations ADD COLUMN IF NOT EXISTS interval_minutes INTEGER NOT NULL DEFAULT 60")
 
 
-def create_task(task_id: str, code: str, session_token: Optional[str] = None):
+def create_task(task_id: str, code: str, session_token: Optional[str] = None, meta: Optional[dict] = None):
     with db() as conn:
-        conn.execute("""
-        INSERT INTO tasks(task_id, code, status, progress, stage, message, session_token)
-        VALUES (%s,%s,'queued',0,'Queued','Menunggu GitHub Actions...',%s)
-        ON CONFLICT(task_id) DO UPDATE SET code=EXCLUDED.code, session_token=EXCLUDED.session_token, updated_at=NOW()
-        """, (task_id, code, session_token))
-        conn.execute("INSERT INTO task_logs(task_id,message) VALUES(%s,%s)", (task_id, f"Menerima input: {code}"))
+        conn.execute("""INSERT INTO tasks(task_id,code,status,progress,stage,message,session_token,meta)
+        VALUES(%s,%s,'queued',0,'Queued','Menunggu GitHub Actions...',%s,%s::jsonb)
+        ON CONFLICT(task_id) DO UPDATE SET code=EXCLUDED.code,session_token=EXCLUDED.session_token,meta=EXCLUDED.meta,updated_at=NOW()""",
+                     (task_id,code,session_token,json.dumps(meta or {},ensure_ascii=False)))
+        conn.execute("INSERT INTO task_logs(task_id,message) VALUES(%s,%s)", (task_id,f"Menerima input: {code}"))
 
 
 def update_task(task_id: str, **fields):
-    allowed = {"status","progress","stage","message","size_bytes","speed_kbps","result","error","completed_at","session_token"}
-    fields = {k:v for k,v in fields.items() if k in allowed}
-    if not fields:
-        return
-    fields["updated_at"] = datetime.now(timezone.utc)
-    parts = [f"{k}=%s" for k in fields]
-    vals = list(fields.values()) + [task_id]
+    allowed={"status","progress","stage","message","size_bytes","speed_kbps","result","error","completed_at","session_token","meta"}
+    fields={k:v for k,v in fields.items() if k in allowed}
+    if not fields:return
+    fields["updated_at"]=datetime.now(timezone.utc)
+    parts=[f"{k}=%s" + ("::jsonb" if k in {"result","meta"} else "") for k in fields]
+    vals=[json.dumps(v,ensure_ascii=False) if k in {"result","meta"} else v for k,v in fields.items()]+[task_id]
+    with db() as conn: conn.execute(f"UPDATE tasks SET {','.join(parts)} WHERE task_id=%s",vals)
+
+
+def add_log(task_id: str,message: str,level: str="info"):
     with db() as conn:
-        conn.execute(f"UPDATE tasks SET {', '.join(parts)} WHERE task_id=%s", vals)
+        conn.execute("INSERT INTO task_logs(task_id,level,message) VALUES(%s,%s,%s)",(task_id,level,message))
+        conn.execute("UPDATE tasks SET updated_at=NOW() WHERE task_id=%s",(task_id,))
 
 
-def add_log(task_id: str, message: str, level: str = "info"):
+def get_logs(task_id: str,limit: int=200):
     with db() as conn:
-        conn.execute("INSERT INTO task_logs(task_id,level,message) VALUES(%s,%s,%s)", (task_id,level,message))
-        conn.execute("UPDATE tasks SET updated_at=NOW() WHERE task_id=%s", (task_id,))
-
-
-def get_task(task_id: str):
-    with db() as conn:
-        row = conn.execute("SELECT * FROM tasks WHERE task_id=%s", (task_id,)).fetchone()
-        if not row:
-            return None
-        row = dict(row)
-        row["logs"] = get_logs(task_id)
-        for k,v in list(row.items()): row[k] = _json(v)
-        return row
-
-
-def get_logs(task_id: str, limit: int = 200):
-    with db() as conn:
-        rows = conn.execute("SELECT level,message,created_at FROM task_logs WHERE task_id=%s ORDER BY id ASC LIMIT %s", (task_id,limit)).fetchall()
+        rows=conn.execute("SELECT level,message,created_at FROM task_logs WHERE task_id=%s ORDER BY id ASC LIMIT %s",(task_id,limit)).fetchall()
         return [{"level":r["level"],"message":r["message"],"created_at":_json(r["created_at"])} for r in rows]
 
 
-def list_tasks(limit: int = 100):
+def get_task(task_id: str):
+    with db() as conn: row=conn.execute("SELECT * FROM tasks WHERE task_id=%s",(task_id,)).fetchone()
+    if not row:return None
+    row=dict(row); row["logs"]=get_logs(task_id)
+    return {k:_json(v) for k,v in row.items()}
+
+
+def list_tasks(limit:int=100):
+    with db() as conn: rows=conn.execute("SELECT * FROM tasks ORDER BY created_at DESC LIMIT %s",(limit,)).fetchall()
+    return [{k:_json(v) for k,v in dict(r).items()} for r in rows]
+
+
+def upsert_session(session_token:str,email:str):
+    with db() as conn: conn.execute("""INSERT INTO sessions(session_token,email) VALUES(%s,%s)
+    ON CONFLICT(session_token) DO UPDATE SET email=EXCLUDED.email,updated_at=NOW()""",(session_token,email or ""))
+
+
+def get_session_email(session_token:str)->str:
+    with db() as conn: row=conn.execute("SELECT email FROM sessions WHERE session_token=%s",(session_token,)).fetchone()
+    return (row["email"] if row else "") or ""
+
+
+def upsert_history(item:dict):
+    name=item.get("name",""); email=item.get("email","") or ""; session=item.get("session_token","") or ""
+    data=dict(item); [data.pop(k,None) for k in ("email","session_token","name","drive_file_id","thumb")]
     with db() as conn:
-        rows = conn.execute("SELECT * FROM tasks ORDER BY created_at DESC LIMIT %s", (limit,)).fetchall()
-        return [{k:_json(v) for k,v in dict(r).items()} for r in rows]
+        conn.execute("DELETE FROM histories WHERE name=%s AND (email=%s OR session_token=%s)",(name,email,session))
+        conn.execute("INSERT INTO histories(name,email,session_token,drive_file_id,thumb,data) VALUES(%s,%s,%s,%s,%s,%s::jsonb)",(name,email,session,item.get("drive_file_id"),item.get("thumb"),json.dumps(data,ensure_ascii=False)))
 
 
-def upsert_session(session_token: str, email: str):
+def list_history(session_token:str="",email:str="",limit:int=50):
     with db() as conn:
-        conn.execute("""
-        INSERT INTO sessions(session_token,email) VALUES(%s,%s)
-        ON CONFLICT(session_token) DO UPDATE SET email=EXCLUDED.email, updated_at=NOW()
-        """, (session_token,email or ""))
+        rows=conn.execute("SELECT name,email,session_token,drive_file_id,thumb,data FROM histories WHERE (%s='' OR email=%s OR session_token=%s) ORDER BY created_at DESC LIMIT %s",(session_token,email,session_token,limit)).fetchall()
+    out=[]
+    for r in rows:
+        item=dict(r["data"] or {}); item.update(name=r["name"],email=r["email"],session_token=r["session_token"])
+        if r["drive_file_id"]:item["drive_file_id"]=r["drive_file_id"]
+        if r["thumb"]:item["thumb"]=r["thumb"]
+        out.append(item)
+    return out
 
 
-def get_session_email(session_token: str) -> str:
+def delete_history(name:str,session_token:str=""):
     with db() as conn:
-        row = conn.execute("SELECT email FROM sessions WHERE session_token=%s", (session_token,)).fetchone()
-        return (row["email"] if row else "") or ""
+        conn.execute("DELETE FROM histories WHERE name=%s" + (" AND session_token=%s" if session_token else ""),(name,session_token) if session_token else (name,))
 
 
-def upsert_history(item: dict):
-    name = item.get("name", "")
-    email = item.get("email", "") or ""
-    session = item.get("session_token", "") or ""
-    data = dict(item)
-    data.pop("email", None); data.pop("session_token", None); data.pop("name", None)
-    with db() as conn:
-        conn.execute("DELETE FROM histories WHERE name=%s AND ((email=%s) OR (session_token=%s))", (name,email,session))
-        conn.execute("INSERT INTO histories(name,email,session_token,drive_file_id,thumb,data) VALUES(%s,%s,%s,%s,%s,%s::jsonb)",
-                     (name,email,session,item.get("drive_file_id"),item.get("thumb"),json.dumps(data,ensure_ascii=False)))
+def clear_history(session_token:str=""):
+    with db() as conn: conn.execute("DELETE FROM histories" + (" WHERE session_token=%s" if session_token else ""),(session_token,) if session_token else ())
 
 
-def list_history(session_token: str = "", email: str = "", limit: int = 50):
-    with db() as conn:
-        rows = conn.execute("SELECT name,email,session_token,drive_file_id,thumb,data,created_at FROM histories WHERE (%s='' OR email=%s OR session_token=%s) ORDER BY created_at DESC LIMIT %s", (session_token,email,session_token,limit)).fetchall()
-        out=[]
-        for r in rows:
-            item = dict(r["data"] or {})
-            item.update({"name":r["name"],"email":r["email"],"session_token":r["session_token"]})
-            if r["drive_file_id"]: item["drive_file_id"] = r["drive_file_id"]
-            if r["thumb"]: item["thumb"] = r["thumb"]
-            out.append(item)
-        return out
-
-
-def delete_history(name: str, session_token: str = ""):
-    with db() as conn:
-        if session_token:
-            conn.execute("DELETE FROM histories WHERE name=%s AND session_token=%s", (name,session_token))
-        else:
-            conn.execute("DELETE FROM histories WHERE name=%s", (name,))
-
-
-def clear_history(session_token: str = ""):
-    with db() as conn:
-        if session_token: conn.execute("DELETE FROM histories WHERE session_token=%s", (session_token,))
-        else: conn.execute("DELETE FROM histories")
-
-
-def find_history_duplicate(code: str, email: str):
-    needle = "".join(c for c in code if c.isalnum()).lower()
-    if not needle: return None
-    for item in list_history(email=email, limit=200):
-        norm = "".join(c for c in item.get("name","") if c.isalnum()).lower()
-        if norm and needle in norm: return item
+def find_history_duplicate(code:str,email:str):
+    needle="".join(c for c in code if c.isalnum()).lower()
+    if not needle:return None
+    for item in list_history(email=email,limit=200):
+        norm="".join(c for c in item.get("name","") if c.isalnum()).lower()
+        if norm and needle in norm:return item
     return None
 
 
 def list_automations():
-    with db() as conn:
-        rows = conn.execute("SELECT * FROM automations ORDER BY id DESC").fetchall()
-        return [{k:_json(v) for k,v in dict(r).items()} for r in rows]
+    with db() as conn: rows=conn.execute("SELECT * FROM automations ORDER BY id DESC").fetchall()
+    return [{k:_json(v) for k,v in dict(r).items()} for r in rows]
 
 
-def upsert_automation(name: str, interval_minutes: int = 60, action: str = "worker", config: Optional[dict] = None, enabled: bool = True):
-    interval_minutes = max(1, int(interval_minutes))
+def upsert_automation(name:str,interval_minutes:int=60,action:str="worker",config:Optional[dict]=None,enabled:bool=True):
+    interval_minutes=max(1,int(interval_minutes))
     with db() as conn:
-        row = conn.execute("""INSERT INTO automations(name,enabled,interval_minutes,action,config)
-        VALUES(%s,%s,%s,%s,%s::jsonb)
-        ON CONFLICT(name) DO UPDATE SET enabled=EXCLUDED.enabled, interval_minutes=EXCLUDED.interval_minutes,
-        action=EXCLUDED.action, config=EXCLUDED.config, updated_at=NOW() RETURNING id""", (name,enabled,interval_minutes,action,json.dumps(config or {}))).fetchone()
-        return row["id"]
+        row=conn.execute("""INSERT INTO automations(name,enabled,interval_minutes,action,config) VALUES(%s,%s,%s,%s,%s::jsonb)
+        ON CONFLICT(name) DO UPDATE SET enabled=EXCLUDED.enabled,interval_minutes=EXCLUDED.interval_minutes,action=EXCLUDED.action,config=EXCLUDED.config,updated_at=NOW() RETURNING id""",(name,enabled,interval_minutes,action,json.dumps(config or {}))).fetchone()
+    return row["id"]
 
 
 def due_automations():
-    with db() as conn:
-        rows = conn.execute("""
-        SELECT * FROM automations WHERE enabled=TRUE AND (last_run_at IS NULL OR last_run_at + make_interval(mins => interval_minutes) <= NOW())
-        ORDER BY id ASC
-        """).fetchall()
-        return [dict(r) for r in rows]
+    with db() as conn: rows=conn.execute("""SELECT * FROM automations WHERE enabled=TRUE AND (last_run_at IS NULL OR last_run_at + make_interval(mins => interval_minutes) <= NOW()) ORDER BY id ASC""").fetchall()
+    return [dict(r) for r in rows]
 
 
-def mark_automation_run(automation_id: int):
-    with db() as conn:
-        conn.execute("UPDATE automations SET last_run_at=NOW(), next_run_at=NOW()+make_interval(mins => interval_minutes), updated_at=NOW() WHERE id=%s", (automation_id,))
+def mark_automation_run(automation_id:int):
+    with db() as conn: conn.execute("UPDATE automations SET last_run_at=NOW(),next_run_at=NOW()+make_interval(mins => interval_minutes),updated_at=NOW() WHERE id=%s",(automation_id,))
