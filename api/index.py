@@ -1,6 +1,6 @@
 # api/index.py
-# Remote Uploader — FastAPI untuk Vercel (UI + API + koordinasi GitHub)
-# State disimpan di GitHub (data/state.json), eksekusi berat di GitHub Actions.
+# FastAPI API/UI + GitHub Actions coordinator.
+# Persistent tasks, sessions, history and automations live in PostgreSQL.
 import base64
 import hashlib
 import json
@@ -19,541 +19,367 @@ from googleapiclient.discovery import build
 from pydantic import BaseModel
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from db import (
+    init_db, create_task, update_task, add_log, get_task, upsert_session,
+    get_session_email, upsert_history, list_history, delete_history,
+    clear_history, find_history_duplicate, list_automations, upsert_automation,
+    due_automations, mark_automation_run,
+)
 from ui.html import get_full_ui
 from ui.modal import get_modals_html
 
 app = FastAPI(title="Remote Uploader", docs_url=None, redoc_url=None)
-APP_VERSION = "1.0.0 (Vercel + GitHub Actions)"
+APP_VERSION = "1.1.0 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
 
-# ------------------------------------------------------------------ ENV
 GH_TOKEN = os.environ.get("GH_TOKEN", "")
-GH_REPO = os.environ.get("GH_REPO", "")            # e.g. owner/repo
+GH_REPO = os.environ.get("GH_REPO", "")
 GH_BRANCH = os.environ.get("GH_BRANCH", "main")
-API_BASE = os.environ.get("API_BASE", "")          # public URL, dipakai worker
-WORKER_SECRET = os.environ.get("WORKER_SECRET", "")  # dibagikan dengan workflow
+API_BASE = os.environ.get("API_BASE", "").rstrip("/")
+WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 GDRIVE_FOLDER = os.environ.get("GDRIVE_FOLDER", "javColab")
-
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 
-_ENC = os.environ.get("API_ENC_KEY", "").encode() or hashlib.sha256(
-    (os.environ.get("WORKER_SECRET", "puppeter") + "::enc").encode()
-).digest()
+_ENC = os.environ.get("API_ENC_KEY", "").encode() or hashlib.sha256((WORKER_SECRET or "puppeter") + "::enc".encode()).digest()
 FERNET = Fernet(base64.urlsafe_b64encode(_ENC[:32]))
 
 
-# ------------------------------------------------------------------ GH helpers
+def _db_ready():
+    try:
+        init_db()
+        return True
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database belum siap: {e}")
+
+
+@app.on_event("startup")
+def startup():
+    # Vercel may cold-start multiple instances; CREATE IF NOT EXISTS is safe.
+    if os.environ.get("DATABASE_URL"):
+        init_db()
+
+
 def _gh_headers(extra=None, auth=True):
-    h = {"Accept": "application/vnd.github+json"}
-    if auth and GH_TOKEN:
-        h["Authorization"] = f"Bearer {GH_TOKEN}"
-    if extra:
-        h.update(extra)
+    h={"Accept":"application/vnd.github+json"}
+    if auth and GH_TOKEN: h["Authorization"]=f"Bearer {GH_TOKEN}"
+    if extra: h.update(extra)
     return h
 
 
 def gh_get(path):
-    """Return (content_b64, sha) or (None, None)."""
-    r = requests.get(
-        f"https://api.github.com/repos/{GH_REPO}/contents/{path}",
-        headers=_gh_headers(),
-        timeout=20,
-    )
-    if r.status_code == 404:
-        return None, None
-    if r.status_code != 200:
-        raise RuntimeError(f"GH get {path}: {r.status_code} {r.text[:200]}")
-    d = r.json()
-    return d.get("content"), d.get("sha")
+    r=requests.get(f"https://api.github.com/repos/{GH_REPO}/contents/{path}",headers=_gh_headers(),timeout=20)
+    if r.status_code==404:return None,None
+    if r.status_code!=200:raise RuntimeError(f"GH get {path}: {r.status_code} {r.text[:200]}")
+    d=r.json();return d.get("content"),d.get("sha")
 
 
-def gh_put(path, content_b64, message="state update"):
-    c, sha = gh_get(path)
-    body = {
-        "message": message,
-        "content": content_b64,
-        "branch": GH_BRANCH,
-        "committer": {"name": "puppeter-bot", "email": "puppeter@users.noreply.github.com"},
-    }
-    if sha:
-        body["sha"] = sha
-    r = requests.put(
-        f"https://api.github.com/repos/{GH_REPO}/contents/{path}",
-        headers=_gh_headers(auth=True),
-        json=body,
-        timeout=20,
-    )
-    if r.status_code not in (200, 201):
-        raise RuntimeError(f"GH put {path}: {r.status_code} {r.text[:250]}")
-    return r.json().get("content", {}).get("sha")
+def gh_put(path,content_b64,message="state update"):
+    _,sha=gh_get(path)
+    body={"message":message,"content":content_b64,"branch":GH_BRANCH}
+    if sha:body["sha"]=sha
+    r=requests.put(f"https://api.github.com/repos/{GH_REPO}/contents/{path}",headers=_gh_headers(),json=body,timeout=20)
+    if r.status_code not in (200,201):raise RuntimeError(f"GH put {path}: {r.status_code} {r.text[:250]}")
+    return r.json().get("content",{}).get("sha")
 
 
 def gh_delete(path):
-    c, sha = gh_get(path)
-    if not sha:
-        return True
-    r = requests.delete(
-        f"https://api.github.com/repos/{GH_REPO}/contents/{path}",
-        headers=_gh_headers(auth=True),
-        json={"message": f"delete {path}", "sha": sha, "branch": GH_BRANCH},
-        timeout=20,
-    )
-    return r.status_code in (200, 204)
+    _,sha=gh_get(path)
+    if not sha:return True
+    r=requests.delete(f"https://api.github.com/repos/{GH_REPO}/contents/{path}",headers=_gh_headers(),json={"message":f"delete {path}","sha":sha,"branch":GH_BRANCH},timeout=20)
+    return r.status_code in (200,204)
 
 
-def state_get():
-    b64, _ = gh_get("data/state.json")
-    if not b64:
-        return {"tasks": {}, "history": [], "sessions": {}}
-    return json.loads(base64.b64decode(b64).decode("utf-8"))
+def dispatch_repo(event_type,payload):
+    r=requests.post(f"https://api.github.com/repos/{GH_REPO}/dispatches",headers=_gh_headers(),json={"event_type":event_type,"client_payload":payload},timeout=20)
+    if r.status_code not in (200,201,204):raise RuntimeError(f"dispatch: {r.status_code} {r.text[:250]}")
 
 
-def state_save(state):
-    raw = json.dumps(state, ensure_ascii=False).encode("utf-8")
-    if len(raw) > 1_000_000:
-        state["tasks"] = {
-            k: (dict(v, logs=v.get("logs", [])[-150:]) if isinstance(v, dict) else v)
-            for k, v in state["tasks"].items()
-        }
-        raw = json.dumps(state, ensure_ascii=False).encode("utf-8")
-    gh_put("data/state.json", base64.b64encode(raw).decode(), "auto: update state")
+def require_worker(req:Request):
+    sec=(req.headers.get("x-worker-secret") or "").strip()
+    if not WORKER_SECRET or sec!=WORKER_SECRET:raise HTTPException(status_code=401,detail="X-Worker-Secret salah")
 
 
-def dispatch_repo(event_type, payload):
-    r = requests.post(
-        f"https://api.github.com/repos/{GH_REPO}/dispatches",
-        headers=_gh_headers(auth=True),
-        json={"event_type": event_type, "client_payload": payload},
-        timeout=20,
-    )
-    if r.status_code not in (200, 201, 204):
-        raise RuntimeError(f"dispatch: {r.status_code} {r.text[:250]}")
+def wib_time():return datetime.now(timezone(timedelta(hours=7))).strftime("%d %b %Y %H:%M WIB")
+
+# Google Drive OAuth tokens remain encrypted in GitHub because they are credentials,
+# while operational application data is now PostgreSQL.
+TOKEN_DIR="data/tokens"
+PENDING_DIR="data/pending"
 
 
-def require_worker(req: Request):
-    sec = (req.headers.get("x-worker-secret") or "").strip()
-    if not WORKER_SECRET or sec != WORKER_SECRET:
-        raise HTTPException(status_code=401, detail="X-Worker-Secret salah")
-
-
-def wib_time():
-    return datetime.now(timezone(timedelta(hours=7))).strftime("%d %b %Y %H:%M WIB")
-
-
-# ------------------------------------------------------------------ GDrive token store
-TOKEN_DIR = "data/tokens"
-
-
-def save_token(session_token, token_json):
-    data = json.dumps(token_json).encode()
-    enc = FERNET.encrypt(data)
-    gh_put(f"{TOKEN_DIR}/{session_token}.enc", base64.b64encode(enc).decode(), "auto: token")
+def save_token(session_token,token_json):
+    enc=FERNET.encrypt(json.dumps(token_json).encode())
+    gh_put(f"{TOKEN_DIR}/{session_token}.enc",base64.b64encode(enc).decode(),"auto: token")
 
 
 def load_token(session_token):
-    b64, _ = gh_get(f"{TOKEN_DIR}/{session_token}.enc")
-    if not b64:
-        return None
-    try:
-        dec = FERNET.decrypt(base64.b64decode(b64))
-        return json.loads(dec.decode("utf-8"))
-    except InvalidToken:
-        return None
-
-
-def session_email(session_token, state=None):
-    st = state if state is not None else state_get()
-    return st.get("sessions", {}).get(session_token, "")
+    b64,_=gh_get(f"{TOKEN_DIR}/{session_token}.enc")
+    if not b64:return None
+    try:return json.loads(FERNET.decrypt(base64.b64decode(b64)).decode())
+    except InvalidToken:return None
 
 
 def gdrive_service(session_token):
-    token = load_token(session_token)
-    if not token:
-        raise HTTPException(status_code=404, detail="Sesi tidak terhubung")
-    creds = Credentials(
-        token=token.get("access_token"),
-        refresh_token=token.get("refresh_token"),
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=token.get("client_id") or GOOGLE_CLIENT_ID,
-        client_secret=token.get("client_secret") or GOOGLE_CLIENT_SECRET,
-        scopes=["https://www.googleapis.com/auth/drive"],
-    )
+    token=load_token(session_token)
+    if not token:raise HTTPException(status_code=404,detail="Sesi tidak terhubung")
+    creds=Credentials(token=token.get("access_token"),refresh_token=token.get("refresh_token"),token_uri="https://oauth2.googleapis.com/token",client_id=token.get("client_id") or GOOGLE_CLIENT_ID,client_secret=token.get("client_secret") or GOOGLE_CLIENT_SECRET,scopes=["https://www.googleapis.com/auth/drive"])
     if creds.expired:
-        creds.refresh(GoogleRequest())
-        token["access_token"] = creds.token
-        save_token(session_token, token)
-    return build("drive", "v3", credentials=creds)
+        creds.refresh(GoogleRequest());token["access_token"]=creds.token;save_token(session_token,token)
+    return build("drive","v3",credentials=creds)
 
 
-def gdrive_delete_file(session_token, drive_file_id):
+def gdrive_delete_file(session_token,drive_file_id):
     try:
-        if not drive_file_id:
-            return False
-        service = gdrive_service(session_token)
-        service.files().delete(fileId=drive_file_id).execute()
-        return True
-    except Exception:
-        return False
+        if not drive_file_id:return False
+        gdrive_service(session_token).files().delete(fileId=drive_file_id).execute();return True
+    except Exception:return False
 
 
-# ------------------------------------------------------------------ Device flow (stateless via GH pending)
-PENDING_DIR = "data/pending"
+def pending_save(code,obj):
+    gh_put(f"{PENDING_DIR}/{code}.json",base64.b64encode(json.dumps(obj).encode()).decode(),"auto: pending auth")
 
 
-def pending_save(device_code, obj):
-    gh_put(
-        f"{PENDING_DIR}/{device_code}.json",
-        base64.b64encode(json.dumps(obj).encode()).decode(),
-        "auto: pending auth",
-    )
+def pending_load(code):
+    b64,sha=gh_get(f"{PENDING_DIR}/{code}.json")
+    return (json.loads(base64.b64decode(b64).decode()),sha) if b64 else (None,None)
 
 
-def pending_load(device_code):
-    b64, sha = gh_get(f"{PENDING_DIR}/{device_code}.json")
-    if not b64:
-        return None, None
-    return json.loads(base64.b64decode(b64).decode()), sha
-
-
-def pending_del(device_code):
-    gh_delete(f"{PENDING_DIR}/{device_code}.json")
+def pending_del(code):gh_delete(f"{PENDING_DIR}/{code}.json")
 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "app": APP_VERSION}
+    _db_ready()
+    return {"ok":True,"app":APP_VERSION,"database":"postgresql","worker":"github-actions","playwright":"chromium"}
 
 
-# ------------------------------------------------------------------ Saran
 @app.get("/api/saran_random")
 def get_saran_random():
     try:
-        import random
-        b64, _ = gh_get("data/suggestions.json")
-        if not b64:
-            return []
-        rows = json.loads(base64.b64decode(b64).decode())
-        return [r.get("id") for r in random.sample(rows, min(5, len(rows))) if r.get("id")]
-    except Exception:
-        return []
+        b64,_=gh_get("data/suggestions.json")
+        if not b64:return []
+        rows=json.loads(base64.b64decode(b64).decode());import random
+        return [r.get("id") for r in random.sample(rows,min(5,len(rows))) if r.get("id")]
+    except Exception:return []
 
 
-# ------------------------------------------------------------------ Auth GDrive
 @app.get("/api/auth/status")
-def api_auth_status(session_token: str = ""):
-    if not session_token:
-        return {"connected": False}
-    email = session_email(session_token)
-    if email:
-        return {"connected": True, "email": email}
-    token = load_token(session_token)
-    if not token:
-        return {"connected": False}
+def api_auth_status(session_token:str=""):
+    if not session_token:return {"connected":False}
+    _db_ready();email=get_session_email(session_token)
+    if email:return {"connected":True,"email":email}
+    token=load_token(session_token)
+    if not token:return {"connected":False}
     try:
-        service = build("drive", "v3", credentials=gdrive_service(session_token))
-        about = service.about().get(fields="user(emailAddress)").execute()
-        email = about["user"]["emailAddress"]
-        st = state_get()
-        st.setdefault("sessions", {})[session_token] = email
-        state_save(st)
-        return {"connected": True, "email": email}
-    except Exception as e:
-        return {"connected": False, "error": str(e)}
+        about=build("drive","v3",credentials=gdrive_service(session_token)).about().get(fields="user(emailAddress)").execute()
+        email=about["user"]["emailAddress"];upsert_session(session_token,email)
+        return {"connected":True,"email":email}
+    except Exception as e:return {"connected":False,"error":str(e)}
 
 
 @app.post("/api/auth/device")
 def api_start_device_flow():
-    if not GOOGLE_CLIENT_ID:
-        raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_ID belum di-set")
-    resp = requests.post(
-        "https://oauth2.googleapis.com/device/code",
-        data={"client_id": GOOGLE_CLIENT_ID, "scope": "https://www.googleapis.com/auth/drive.file"},
-        timeout=15,
-    )
-    if resp.status_code != 200:
-        raise HTTPException(status_code=500, detail=f"Gagal minta device code: {resp.text[:200]}")
-    r = resp.json()
-    pending_save(r["device_code"], {
-        "user_code": r["user_code"],
-        "verification_url": r["verification_url"],
-        "expires_at": time.time() + r["expires_in"],
-        "interval": r.get("interval", 5),
-    })
-    return {
-        "user_code": r["user_code"],
-        "verification_url": r["verification_url"],
-        "device_code": r["device_code"],
-    }
+    if not GOOGLE_CLIENT_ID:raise HTTPException(status_code=500,detail="GOOGLE_CLIENT_ID belum di-set")
+    r=requests.post("https://oauth2.googleapis.com/device/code",data={"client_id":GOOGLE_CLIENT_ID,"scope":"https://www.googleapis.com/auth/drive.file"},timeout=15)
+    if r.status_code!=200:raise HTTPException(status_code=500,detail=f"Gagal minta device code: {r.text[:200]}")
+    x=r.json();pending_save(x["device_code"],{"user_code":x["user_code"],"verification_url":x["verification_url"],"expires_at":time.time()+x["expires_in"],"interval":x.get("interval",5)})
+    return {"user_code":x["user_code"],"verification_url":x["verification_url"],"device_code":x["device_code"]}
 
 
 @app.post("/api/auth/poll")
-def api_poll_token(data: dict):
-    device_code = (data or {}).get("device_code", "")
-    if not device_code:
-        return {"status": "error", "detail": "device_code wajib"}
-    pending, sha = pending_load(device_code)
-    if not pending:
-        return {"status": "error", "detail": "Kode kadaluarsa atau tidak dikenal"}
-    if time.time() > pending["expires_at"]:
-        pending_del(device_code)
-        return {"status": "error", "detail": "Kode sudah kedaluwarsa"}
+def api_poll_token(data:dict):
+    code=(data or {}).get("device_code","")
+    if not code:return {"status":"error","detail":"device_code wajib"}
+    pending,_=pending_load(code)
+    if not pending:return {"status":"error","detail":"Kode kadaluarsa atau tidak dikenal"}
+    if time.time()>pending["expires_at"]:pending_del(code);return {"status":"error","detail":"Kode sudah kedaluwarsa"}
     try:
-        resp = requests.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "device_code": device_code,
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            },
-            timeout=15,
-        )
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
-    if resp.status_code == 200:
-        token = resp.json()
-        import secrets
-        session_token = secrets.token_urlsafe(32)
-        token["client_id"] = GOOGLE_CLIENT_ID
-        token["client_secret"] = GOOGLE_CLIENT_SECRET
-        save_token(session_token, token)
+        r=requests.post("https://oauth2.googleapis.com/token",data={"client_id":GOOGLE_CLIENT_ID,"client_secret":GOOGLE_CLIENT_SECRET,"device_code":code,"grant_type":"urn:ietf:params:oauth:grant-type:device_code"},timeout=15)
+    except Exception as e:return {"status":"error","detail":str(e)}
+    if r.status_code==200:
+        token=r.json();import secrets
+        session=secrets.token_urlsafe(32);token["client_id"]=GOOGLE_CLIENT_ID;token["client_secret"]=GOOGLE_CLIENT_SECRET;save_token(session,token)
+        email=""
         try:
-            creds = Credentials(
-                token=token.get("access_token"), refresh_token=token.get("refresh_token"),
-                token_uri="https://oauth2.googleapis.com/token",
-                client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET,
-                scopes=["https://www.googleapis.com/auth/drive"],
-            )
-            service = build("drive", "v3", credentials=creds)
-            about = service.about().get(fields="user(emailAddress)").execute()
-            email = about["user"]["emailAddress"]
-        except Exception:
-            email = ""
-        st = state_get()
-        st.setdefault("sessions", {})[session_token] = email
-        state_save(st)
-        pending_del(device_code)
-        return {"status": "success", "session_token": session_token, "email": email}
-    info = resp.json() if resp.text else {}
-    err = info.get("error", "")
-    if err in ("authorization_pending", "slow_down"):
-        return {"status": "pending"}
-    if err in ("expired_token", "invalid_grant"):
-        pending_del(device_code)
-        return {"status": "error", "detail": "Kode sudah kadaluarsa"}
-    return {"status": "error", "detail": info.get("error_description", err)}
+            creds=Credentials(token=token.get("access_token"),refresh_token=token.get("refresh_token"),token_uri="https://oauth2.googleapis.com/token",client_id=GOOGLE_CLIENT_ID,client_secret=GOOGLE_CLIENT_SECRET,scopes=["https://www.googleapis.com/auth/drive"])
+            email=build("drive","v3",credentials=creds).about().get(fields="user(emailAddress)").execute()["user"]["emailAddress"]
+        except Exception:pass
+        _db_ready();upsert_session(session,email);pending_del(code)
+        return {"status":"success","session_token":session,"email":email}
+    info=r.json() if r.text else {};err=info.get("error","")
+    if err in ("authorization_pending","slow_down"):return {"status":"pending"}
+    if err in ("expired_token","invalid_grant"):pending_del(code);return {"status":"error","detail":"Kode sudah kedaluwarsa"}
+    return {"status":"error","detail":info.get("error_description",err)}
 
 
-# ------------------------------------------------------------------ token API (worker)
 @app.get("/api/token/{session_token}")
-def api_token_get(session_token: str, req: Request):
-    require_worker(req)
-    token = load_token(session_token)
-    if not token:
-        raise HTTPException(status_code=404, detail="Token tidak ditemukan")
+def api_token_get(session_token:str,req:Request):
+    require_worker(req);token=load_token(session_token)
+    if not token:raise HTTPException(status_code=404,detail="Token tidak ditemukan")
     return token
 
 
 @app.post("/api/token/{session_token}")
-def api_token_save(session_token: str, req: Request, body: dict):
-    require_worker(req)
-    token = load_token(session_token)
-    if token:
-        token.update(body or {})
-    else:
-        token = body or {}
-    save_token(session_token, token)
-    return {"ok": True}
+def api_token_save(session_token:str,req:Request,body:dict):
+    require_worker(req);token=load_token(session_token) or {};token.update(body or {});save_token(session_token,token);return {"ok":True}
 
 
-# ------------------------------------------------------------------ Download task
 class DownloadRequest(BaseModel):
-    url: str
-    filename: str = ""
-    session_token: str = ""
+    url:str
+    filename:str=""
+    session_token:str=""
 
 
 @app.post("/api/download")
-def process_download(req: DownloadRequest, request: Request):
-    raw = req.url.strip()
-    if not raw:
-        raise HTTPException(status_code=400, detail="Input kosong")
-    if raw.startswith("http://") or raw.startswith("https://"):
-        raise HTTPException(status_code=400, detail="Masukkan kode pencarian, bukan URL!")
-
-    st = state_get()
-    st.setdefault("tasks", {})
-    st.setdefault("history", [])
-    st.setdefault("sessions", {})
-
-    email = st.get("sessions", {}).get(req.session_token, "")
-
-    # ---- duplicate by email
-    dupe = next(
-        (h for h in st.get("history", [])
-         if h.get("email") == email and "".join(c for c in h.get("name", "") if c.isalnum()).lower() and (
-            "".join(c for c in raw if c.isalnum()).lower() in
-            "".join(c for c in h.get("name", "") if c.isalnum()).lower())),
-        None,
-    )
+def process_download(req:DownloadRequest):
+    raw=req.url.strip()
+    if not raw:raise HTTPException(status_code=400,detail="Input kosong")
+    if raw.startswith(("http://","https://")):raise HTTPException(status_code=400,detail="Masukkan kode pencarian, bukan URL!")
+    _db_ready();email=get_session_email(req.session_token) if req.session_token else ""
+    dupe=find_history_duplicate(raw,email) if email else None
     if dupe:
-        st["tasks"][raw] = {
-            "id": raw, "status": "Selesai", "percent": 100, "speed": 0,
-            "downloaded": 0, "total": 0, "clean_title": dupe.get("name", raw),
-            "status_text": "Sudah ada di riwayat, unduhan dilewati.",
-            "logs": [f"✅ [DUPLIKAT] '{dupe.get('name')}' sudah ada. Melewati unduhan."],
-            "created": wib_time(), "updated": wib_time(),
-        }
-        state_save(st)
-        return {"status": "started", "task_id": raw}
-
-    if raw in st["tasks"] and st["tasks"][raw].get("status") in ("Memproses", "Mengunduh", "Mengunggah"):
-        return {"status": "started", "task_id": raw}
-
-    st["tasks"][raw] = {
-        "id": raw, "status": "Scheduling", "percent": 0, "speed": 0,
-        "downloaded": 0, "total": 0, "clean_title": "",
-        "status_text": "Menunggu worker GitHub Actions...",
-        "logs": ["🔍 Menerima input: {}".format(raw), "⏳ Menjadwalkan ke GitHub Actions..."],
-        "created": wib_time(), "updated": wib_time(), "session_token": req.session_token,
-    }
-    state_save(st)
-
-    try:
-        dispatch_repo("jav-task", {"task_id": raw})
+        create_task(raw,raw,req.session_token,{"clean_title":dupe.get("name",raw),"status_text":"Sudah ada di riwayat, unduhan dilewati."})
+        update_task(raw,status="Selesai",progress=100,message="Sudah ada di riwayat",completed_at=datetime.now(timezone.utc))
+        add_log(raw,f"✅ [DUPLIKAT] '{dupe.get('name',raw)}' sudah ada. Melewati unduhan.")
+        return {"status":"started","task_id":raw}
+    existing=get_task(raw)
+    if existing and existing.get("status") in ("Memproses","Mengunduh","Mengunggah","Scheduling","queued"):
+        return {"status":"started","task_id":raw}
+    create_task(raw,raw,req.session_token,{"clean_title":"","status_text":"Menunggu worker GitHub Actions...","created":wib_time()})
+    add_log(raw,"⏳ Menjadwalkan ke GitHub Actions...")
+    try:dispatch_repo("jav-task",{"task_id":raw})
     except Exception as e:
-        st = state_get()
-        st.setdefault("tasks", {})
-        if raw in st.get("tasks", {}):
-            st["tasks"][raw]["status"] = "Gagal: scheduling"
-            st["tasks"][raw]["status_text"] = f"Gagal dispatch GitHub Actions: {e}"
-            st["tasks"][raw]["logs"].append(f"❌ {e}")
-        state_save(st)
-        raise HTTPException(status_code=500, detail=f"Gagal dispatch: {e}")
-    return {"status": "started", "task_id": raw}
+        update_task(raw,status="Gagal: scheduling",message=f"Gagal dispatch GitHub Actions: {e}",error=str(e));add_log(raw,f"❌ {e}","error")
+        raise HTTPException(status_code=500,detail=f"Gagal dispatch: {e}")
+    return {"status":"started","task_id":raw}
 
 
-# ------------------------------------------------------------------ Task report (worker)
 class ReportBody(BaseModel):
-    task_id: str
-    task: dict = {}
-    history_item: dict | None = None
+    task_id:str
+    task:dict={}
+    history_item:dict|None=None
 
 
 @app.post("/api/task/report")
-def task_report(body: ReportBody, request: Request):
-    require_worker(request)
-    st = state_get()
-    st.setdefault("tasks", {})
-    st.setdefault("history", [])
-    tid = body.task_id
-    cur = st["tasks"].get(tid, {"id": tid})
-    if isinstance(cur, dict):
-        merged = {**cur}
-        for k, v in (body.task or {}).items():
-            if k == "logs" and isinstance(v, list):
-                merged.setdefault("logs", []).extend(v)
-                merged["logs"] = merged["logs"][-200:]
-            else:
-                merged[k] = v
-        merged["updated"] = wib_time()
-        st["tasks"][tid] = merged
+def task_report(body:ReportBody,request:Request):
+    require_worker(request);_db_ready();tid=body.task_id;current=get_task(tid)
+    if not current:
+        create_task(tid,tid,"");current=get_task(tid)
+    fields=dict(body.task or {})
+    logs=fields.pop("logs",[]) if isinstance(fields.get("logs"),list) else []
+    # Preserve UI-compatible metadata while mapping core fields to database columns.
+    meta=current.get("meta") or {}
+    meta.update({k:v for k,v in fields.items() if k not in {"status","percent","speed","downloaded","total","clean_title","status_text","session_token"}})
+    mapping={"status":"status","percent":"progress","speed":"speed_kbps","size":"size_bytes","status_text":"message"}
+    core={}
+    for src,dst in mapping.items():
+        if src in fields:core[dst]=fields[src]
+    if "downloaded" in fields:meta["downloaded"]=fields["downloaded"]
+    if "total" in fields:meta["total"]=fields["total"]
+    if "clean_title" in fields:meta["clean_title"]=fields["clean_title"]
+    if "session_token" in fields:core["session_token"]=fields["session_token"]
+    if "status" in fields and str(fields["status"]).lower() in {"selesai","completed","success","gagal","failed"}:core["completed_at"]=datetime.now(timezone.utc)
+    core["meta"]=meta;update_task(tid,**core)
+    for line in logs:add_log(tid,str(line))
     if body.history_item:
-        item = body.history_item
-        item["time"] = item.get("time") or wib_time()
-        st["history"] = [h for h in st["history"] if h.get("name") != item.get("name")]
-        st["history"].insert(0, item)
-        st["history"] = st["history"][:200]
-    state_save(st)
-    return {"ok": True}
+        item=dict(body.history_item);item.setdefault("time",wib_time())
+        if not item.get("email") and current.get("session_token"):item["email"]=get_session_email(current["session_token"])
+        upsert_history(item)
+    return {"ok":True}
 
 
-# ------------------------------------------------------------------ Progress
 @app.get("/api/progress/{task_id:path}")
-def get_progress(task_id: str):
-    st = state_get()
-    t = st.get("tasks", {}).get(task_id, {})
-    return t
+def get_progress(task_id:str):
+    _db_ready();t=get_task(task_id)
+    if not t:return {}
+    meta=t.pop("meta",{}) or {}
+    out={"id":t.get("task_id"),"status":t.get("status"),"percent":t.get("progress",0),"speed":t.get("speed_kbps",0),"downloaded":meta.get("downloaded",0),"total":meta.get("total",t.get("size_bytes",0)),"clean_title":meta.get("clean_title",""),"status_text":t.get("message",meta.get("status_text","")),"logs":[x.get("message") for x in t.get("logs",[])],"created":meta.get("created",_json_time(t.get("created_at"))),"updated":_json_time(t.get("updated_at")),"session_token":t.get("session_token","")}
+    if t.get("result") is not None:out["result"]=t["result"]
+    if t.get("error"):out["error"]=t["error"]
+    return out
 
 
-# ------------------------------------------------------------------ History
+def _json_time(v):
+    return v.isoformat() if hasattr(v,"isoformat") else v
+
+
 @app.get("/api/history")
-def get_history(session_token: str = ""):
-    if not session_token:
-        return []
-    st = state_get()
-    email = st.get("sessions", {}).get(session_token, "")
-    rows = st.get("history", [])
-    out = [h for h in rows if (email and h.get("email") == email) or h.get("session_token") == session_token]
-    return out[:50]
+def get_history(session_token:str=""):
+    _db_ready();email=get_session_email(session_token) if session_token else ""
+    return list_history(session_token=session_token,email=email,limit=50) if session_token else []
 
 
 class DeleteRequest(BaseModel):
-    filename: str
-    delete_file: bool = False
-    session_token: str = ""
+    filename:str
+    delete_file:bool=False
+    session_token:str=""
 
 
-def _thumb_gh_name(name):
-    h = hashlib.sha256(name.encode()).hexdigest()[:16]
-    return f"{h}.jpg"
+def _thumb_gh_name(name):return f"{hashlib.sha256(name.encode()).hexdigest()[:16]}.jpg"
 
 
 @app.post("/api/history/delete")
-def delete_history_item(req: DeleteRequest):
-    st = state_get()
-    st.setdefault("history", [])
-    item = next((h for h in st["history"] if h.get("name") == req.filename), None)
-    st["history"] = [h for h in st["history"] if h.get("name") != req.filename]
-    state_save(st)
+def delete_history_item(req:DeleteRequest):
+    _db_ready();rows=list_history(session_token=req.session_token,limit=200);item=next((h for h in rows if h.get("name")==req.filename),None)
+    delete_history(req.filename,req.session_token)
     if req.delete_file:
-        if item and item.get("drive_file_id"):
-            gdrive_delete_file(req.session_token, item["drive_file_id"])
-        thumb = item.get("thumb") or _thumb_gh_name(req.filename)
-        try:
-            gh_delete(f"data/thumbs/{thumb}")
-        except Exception:
-            pass
-    return {"status": "success"}
+        if item and item.get("drive_file_id"):gdrive_delete_file(req.session_token,item["drive_file_id"])
+        try:gh_delete(f"data/thumbs/{item.get('thumb') or _thumb_gh_name(req.filename)}")
+        except Exception:pass
+    return {"status":"success"}
 
 
 @app.delete("/api/history/clear")
-def clear_history(session_token: str = ""):
-    st = state_get()
-    st.setdefault("history", [])
-    if session_token:
-        st["history"] = [h for h in st["history"] if h.get("session_token") != session_token]
-    else:
-        st["history"] = []
-    state_save(st)
-    return {"status": "cleared"}
+def clear_history_api(session_token:str=""):
+    _db_ready();clear_history(session_token);return {"status":"cleared"}
 
 
-# ------------------------------------------------------------------ Thumbnail
 @app.get("/api/thumbnail/{name}")
-def get_thumbnail(name: str):
-    path = f"data/thumbs/{name}"
-    b64, _ = gh_get(path)
-    if not b64:
-        return StreamingResponse(iter([]), status_code=404, media_type="text/plain")
-    data = base64.b64decode(b64)
-    return StreamingResponse(iter([data]), media_type="image/jpeg")
+def get_thumbnail(name:str):
+    b64,_=gh_get(f"data/thumbs/{name}")
+    if not b64:return StreamingResponse(iter([]),status_code=404,media_type="text/plain")
+    return StreamingResponse(iter([base64.b64decode(b64)]),media_type="image/jpeg")
 
 
-# ------------------------------------------------------------------ UI
-# Vercel maps api/index.py to /api. Keep the UI at both /api and / so
-# a root rewrite can safely render HTML instead of FastAPI's JSON 404.
-def _ui_html():
-    return get_full_ui(APP_VERSION, get_modals_html())
+# ------------------------------------------------------------------ Real database-backed automation
+class AutomationBody(BaseModel):
+    name:str
+    interval_minutes:int=60
+    action:str="worker"
+    config:dict={}
+    enabled:bool=True
 
 
-@app.get("/api", response_class=HTMLResponse, include_in_schema=False)
-@app.get("/api/", response_class=HTMLResponse, include_in_schema=False)
-def serve_api_ui():
-    return HTMLResponse(content=_ui_html())
+@app.get("/api/automation")
+def automation_list():
+    _db_ready();return list_automations()
 
 
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
-def serve_ui():
-    return HTMLResponse(content=_ui_html())
+@app.post("/api/automation")
+def automation_save(body:AutomationBody):
+    _db_ready();aid=upsert_automation(body.name,body.interval_minutes,body.action,body.config,body.enabled);return {"ok":True,"id":aid}
+
+
+@app.post("/api/automation/run")
+def automation_run(request:Request):
+    require_worker(request);_db_ready();results=[]
+    for a in due_automations():
+        cfg=a.get("config") or {};code=str(cfg.get("code") or cfg.get("url") or "").strip()
+        if not code:
+            mark_automation_run(a["id"]);results.append({"id":a["id"],"status":"skipped","reason":"config.code kosong"});continue
+        tid=f"auto-{a['id']}-{int(time.time())}"
+        create_task(tid,code,str(cfg.get("session_token") or ""),{"automation_id":a["id"],"created":wib_time()});add_log(tid,f"🤖 Automation '{a['name']}' dijalankan")
+        try:
+            dispatch_repo("jav-task",{"task_id":tid});mark_automation_run(a["id"]);results.append({"id":a["id"],"task_id":tid,"status":"dispatched"})
+        except Exception as e:
+            update_task(tid,status="Gagal: scheduling",error=str(e),message=str(e));results.append({"id":a["id"],"status":"error","error":str(e)})
+    return {"ok":True,"results":results}
+
+
+@app.get("/api",response_class=HTMLResponse,include_in_schema=False)
+@app.get("/api/",response_class=HTMLResponse,include_in_schema=False)
+def serve_api_ui():return HTMLResponse(content=get_full_ui(APP_VERSION,get_modals_html()))
+
+
+@app.get("/",response_class=HTMLResponse,include_in_schema=False)
+def serve_ui():return HTMLResponse(content=get_full_ui(APP_VERSION,get_modals_html()))
