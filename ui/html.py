@@ -230,6 +230,7 @@ def get_full_ui(app_version, modals_html):
             let fileToDelete = null;
             let isDownloading = false;
             let currentTaskId = '';
+            const PTASK_KEY = 'ptask';
 
             const driveIconSvg = document.getElementById('driveIconSvg');
             const driveEmail = document.getElementById('driveEmail');
@@ -337,9 +338,8 @@ def get_full_ui(app_version, modals_html):
                         const d = await res.json();
                         
                         if (d.clean_title) { document.getElementById('pFile').innerText = d.clean_title; }
-                        let pct = 0;
-                        if (d.total > 0) { pct = d.percent ? Math.floor(d.percent) : 0; }
-                        else if (d.logs && d.logs.length > 0) {
+                        let pct = d.percent && d.percent > 0 ? Math.floor(d.percent) : 0;
+                        if (pct <= 0 && d.logs && d.logs.length > 0) {
                             const lastLog = d.logs[d.logs.length - 1];
                             const match = lastLog.match(/Progres sedang berlangsung: (\d+)%/);
                             if (match) { pct = parseInt(match[1]); }
@@ -374,6 +374,7 @@ def get_full_ui(app_version, modals_html):
                             document.getElementById('pSpinner').classList.add('hidden');
                             document.getElementById('pMeta').innerText = 'Preview menunggu konfirmasi';
                             showPreview(d);
+                            localStorage.setItem(PTASK_KEY, JSON.stringify({ task_id: taskId, clean_title: d.clean_title, preview: d.preview }));
                             btn.disabled = false; btn.innerText = 'Cari & Tampilkan Preview'; btn.classList.remove('opacity-75');
                             return;
                         }
@@ -381,6 +382,7 @@ def get_full_ui(app_version, modals_html):
                         if (d.status === 'Selesai') {
                             clearInterval(pollTimer);
                             isDownloading = false;
+                            localStorage.removeItem(PTASK_KEY);
                             progressPanel.className = "mt-6 bg-[#052e16] border border-[#166534] rounded-xl overflow-hidden shadow-xl shadow-green-900/20 transition-opacity duration-500";
                             document.getElementById('pStatus').className = "font-bold bg-[#14532d] text-green-300 px-3 py-1.5 rounded-lg border border-[#166534] inline-block truncate";
                             document.getElementById('pStatus').innerText = "✅ Berhasil Disimpan ke GDrive!";
@@ -401,6 +403,7 @@ def get_full_ui(app_version, modals_html):
                         if (d.status && d.status.startsWith('Gagal')) {
                             clearInterval(pollTimer);
                             isDownloading = false;
+                            localStorage.removeItem(PTASK_KEY);
                             progressPanel.className = "mt-6 bg-[#450a0a] border border-[#991b1b] rounded-xl overflow-hidden shadow-xl shadow-red-900/20";
                             document.getElementById('pStatus').className = "font-bold bg-[#7f1d1d] text-red-300 px-3 py-1.5 rounded-lg border border-[#991b1b] inline-block truncate";
                             document.getElementById('pStatus').innerText = "❌ " + d.status;
@@ -411,7 +414,7 @@ def get_full_ui(app_version, modals_html):
                     } catch (pollErr) {
                         console.error('[API Error] Gagal membaca progress:', pollErr);
                     }
-                }, 1000);
+                }, 2000);
             }
 
             document.getElementById('uploadForm').addEventListener('submit', async (e) => {
@@ -428,6 +431,7 @@ def get_full_ui(app_version, modals_html):
                 }
 
                 randomContainer.classList.add('hidden');
+                localStorage.removeItem(PTASK_KEY);
                 const btn = document.getElementById('submitBtn');
                 const errorMsg = document.getElementById('errorMsg');
                 const val = urlInput.value.trim();
@@ -474,24 +478,19 @@ def get_full_ui(app_version, modals_html):
                 }
             });
 
-            // ===== KONFIRMASI DAN UNDUH PENUH KE GDRIVE =====
+            // ===== KONFIRMASI: worker yang SAMA melanjutkan unduh (tanpa reset/restart) =====
             document.getElementById('confirmDownloadBtn').addEventListener('click', async () => {
                 if (!currentTaskId || !sessionToken) return;
                 const btnC = document.getElementById('confirmDownloadBtn');
                 btnC.disabled = true; btnC.innerText = '⏳ Menyiapkan unduhan...';
-                document.getElementById('previewPanel').classList.add('hidden');
 
                 const progressPanel = document.getElementById('progressPanel');
-                progressPanel.className = "mt-6 bg-[#1E293B] border border-[#334155] rounded-xl overflow-hidden shadow-xl";
-                document.getElementById('pBar').className = "progress-bar bg-gradient-to-r from-[#0D9488] to-[#14B8A6] h-full rounded-full relative";
-                document.getElementById('pStatus').className = "font-medium bg-[#0F172A] text-[#94A3B8] px-3 py-1.5 rounded-lg border border-[#334155] inline-block truncate";
-                document.getElementById('pSpinner').classList.remove('hidden');
-                document.getElementById('pBar').style.width = '0%';
-                document.getElementById('pPercent').innerText = '0%';
-                document.getElementById('pStatus').innerText = 'Memicu unduhan penuh ke Google Drive...';
-                document.getElementById('pMeta').innerText = 'Size: 0 B • Speed: 0 KB/s';
-                document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> Konfirmasi diterima — menyiapkan unduhan penuh...</div>';
                 progressPanel.classList.remove('hidden');
+                document.getElementById('pSpinner').classList.remove('hidden');
+                document.getElementById('pStatus').className = "font-medium bg-[#0F172A] text-[#94A3B8] px-3 py-1.5 rounded-lg border border-[#334155] inline-block truncate";
+                document.getElementById('pStatus').innerText = 'Melanjutkan unduhan penuh — progres tidak di-reset...';
+                document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> Konfirmasi diterima — worker yang sama melanjutkan unduhan penuh...</div>';
+                document.getElementById('previewPanel').classList.remove('hidden');
                 isDownloading = true;
 
                 try {
@@ -878,6 +877,33 @@ def get_full_ui(app_version, modals_html):
                 if (sessionToken) { openLogoutModal(); } 
                 else { startAuthFlow(); }
             });
+
+            // ===== RESUME PREVIEW SAAT HALAMAN DI-RELOAD (state via localStorage task_id) =====
+            (function restorePreviewState() {
+                try {
+                    const raw = localStorage.getItem(PTASK_KEY);
+                    if (!raw) return;
+                    const saved = JSON.parse(raw);
+                    if (!saved || !saved.task_id) { localStorage.removeItem(PTASK_KEY); return; }
+                    const progressPanel = document.getElementById('progressPanel');
+                    currentTaskId = saved.task_id;
+                    showPreview({ preview: saved.preview || {}, clean_title: saved.clean_title || '' });
+                    progressPanel.classList.remove('hidden');
+                    document.getElementById('pFile').innerText = saved.clean_title || (saved.preview && saved.preview.filename) || currentTaskId;
+                    document.getElementById('pBar').className = "progress-bar bg-gradient-to-r from-[#0D9488] to-[#14B8A6] h-full rounded-full relative";
+                    document.getElementById('pBar').style.width = '100%';
+                    document.getElementById('pPercent').innerText = '100%';
+                    document.getElementById('pStatus').className = "font-bold bg-[#052e16] text-emerald-300 px-3 py-1.5 rounded-lg border border-[#166534] inline-block truncate";
+                    document.getElementById('pStatus').innerText = '✅ Preview ditemukan — klik "Unduh ke Google Drive" untuk kirim ke GDrive';
+                    document.getElementById('pSpinner').classList.add('hidden');
+                    document.getElementById('pMeta').innerText = 'Preview menunggu konfirmasi';
+                    document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> Memulihkan sesi terakhir — polling berlanjut tiap 2 detik...</div>';
+                    startPolling(currentTaskId);
+                } catch (err) {
+                    console.error('[API Error] Gagal memulihkan preview terakhir:', err);
+                    try { localStorage.removeItem(PTASK_KEY); } catch (e2) {}
+                }
+            })();
 
             checkDriveStatus();
         </script>

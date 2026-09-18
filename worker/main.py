@@ -23,12 +23,20 @@ GH_TOKEN = os.environ.get("GH_TOKEN", "")
 GH_REPO = os.environ.get("GH_REPO", "")
 GH_BRANCH = os.environ.get("GH_BRANCH", "main")
 MIN_FILESIZE = 5 * 1024 * 1024
+# Scope Google Drive harus konsisten dengan Google Cloud Console (drive.file).
+# Scope yang tidak konsisten menyebabkan invalid_scope saat refresh token.
+GDRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+# Setelah preview siap, worker MENUNGGU konfirmasi user (tanpa re-run/dispatch baru).
+WAIT_CONFIRM_TIMEOUT = int(os.environ.get("WAIT_CONFIRM_TIMEOUT", "900"))
+CONFIRM_POLL_INTERVAL = 5
 
 
 def _normalize_gdrive_folder(raw=None):
     """Normalisasi GDRIVE_FOLDER: hanya nama folder di root Drive.
-    basename(strip(env)) dan fallback 'javColab' jika kosong/'.'/..'."""
-    name = os.path.basename((raw or "").strip().strip("/"))
+    Buang prefix 'GDRIVE_FOLDER=' bila secret terlanjur terisi salah,
+    ambil basename, fallback 'javColab' jika kosong/'.'/..'."""
+    val = (raw or "").replace("GDRIVE_FOLDER=", "").strip().strip("/")
+    name = os.path.basename(val) if val else ""
     if not name or name in (".", ".."):
         return "javColab"
     return name
@@ -351,14 +359,14 @@ def format_size(b):
 
 
 # ------------------------------------------------------------------ download
-def download_direct(url, out_path, referer):
+def download_direct(url, out_path, referer, start_pct=0):
     hdr = {"User-Agent": "Mozilla/5.0", "Referer": referer or "https://123av.com/"}
     with requests.get(url, stream=True, timeout=30, headers=hdr, verify=False) as r:
         r.raise_for_status()
         total = int(r.headers.get("content-length", 0) or 0)
         downloaded = 0
         start = time.time()
-        report({"percent": 0, "speed": 0, "downloaded": 0, "total": total,
+        report({"percent": start_pct, "speed": 0, "downloaded": 0, "total": total,
                 "status": "Mengunduh ke runner..."}, force=True)
         with open(out_path, "wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 1024):
@@ -367,16 +375,17 @@ def download_direct(url, out_path, referer):
                 f.write(chunk)
                 downloaded += len(chunk)
                 elapsed = time.time() - start
-                pct = int(downloaded / total * 100) if total else 0
+                raw = int(downloaded / total * 100) if total else 0
+                pct = start_pct + int(raw * (100 - start_pct) / 100)
                 report({"percent": pct, "speed": downloaded / elapsed,
                         "downloaded": downloaded, "total": total,
                         "status": "Mengunduh file fisik..."})
         return os.path.getsize(out_path)
 
 
-def download_hls(url, out_path, referer):
+def download_hls(url, out_path, referer, start_pct=0):
     hdr = "Referer: {}\r\nUser-Agent: Mozilla/5.0\r\n".format(referer or "https://123av.com/")
-    report({"status": "Mengunduh HLS via ffmpeg...", "percent": 0}, force=True)
+    report({"status": "Mengunduh HLS via ffmpeg...", "percent": start_pct}, force=True)
     cmd = ["ffmpeg", "-y", "-headers", hdr, "-i", url, "-c", "copy",
            "-bsf:a", "aac_adtstoasc", out_path]
     stderr_lines = []
@@ -393,7 +402,8 @@ def download_hls(url, out_path, referer):
         m2 = re.search(r"out_time=(\d+):(\d+):(\d+)\.(\d+)", line)
         if m2 and duration:
             ot = int(m2.group(1)) * 3600 + int(m2.group(2)) * 60 + int(m2.group(3))
-            pct = int(ot / duration * 100)
+            raw = int(ot / duration * 100)
+            pct = start_pct + int(raw * (100 - start_pct) / 100)
             if pct != last_pct:
                 last_pct = pct
                 report({"percent": pct, "status": f"Mengunduh HLS... {pct}%"})
@@ -416,7 +426,7 @@ def ensure_folder(service):
     return f["id"]
 
 
-def upload_drive(file_path, token, session_token):
+def upload_drive(file_path, token, session_token, start_pct=0):
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
@@ -426,7 +436,7 @@ def upload_drive(file_path, token, session_token):
         token=token.get("access_token"), refresh_token=token.get("refresh_token"),
         token_uri="https://oauth2.googleapis.com/token",
         client_id=token.get("client_id"), client_secret=token.get("client_secret"),
-        scopes=["https://www.googleapis.com/auth/drive"],
+        scopes=[GDRIVE_SCOPE],
     )
     if creds.expired:
         try:
@@ -445,16 +455,17 @@ def upload_drive(file_path, token, session_token):
     while resp is None:
         status, resp = req.next_chunk()
         if status:
-            pct = int(status.progress() * 100)
+            raw = int(status.progress() * 100)
+            pct = start_pct + int(raw * (100 - start_pct) / 100)
             if pct != last:
                 last = pct
                 report({"percent": pct, "status": f"Mengunggah ke Drive... {pct}%"})
-            if pct in (50, 90):
+            if raw in (50, 90):
                 try:
                     put_token(session_token, {
                         "access_token": creds.token, "refresh_token": creds.refresh_token,
                         "client_id": token.get("client_id"), "client_secret": token.get("client_secret"),
-                        "scopes": token.get("scopes", []),
+                        "scopes": [GDRIVE_SCOPE],
                     })
                 except Exception:
                     pass
@@ -462,7 +473,7 @@ def upload_drive(file_path, token, session_token):
         put_token(session_token, {
             "access_token": creds.token, "refresh_token": creds.refresh_token,
             "client_id": token.get("client_id"), "client_secret": token.get("client_secret"),
-            "scopes": token.get("scopes", []),
+            "scopes": [GDRIVE_SCOPE],
         })
     except Exception:
         pass
@@ -589,6 +600,27 @@ def fetch_preview_metadata(page_url, cdn, title):
 
 
 # ------------------------------------------------------------------ main
+def wait_for_confirmation(timeout=WAIT_CONFIRM_TIMEOUT):
+    """Setelah preview_ready, worker run yang SAMA menunggu user menekan
+    'Unduh ke Google Drive' (confirmed=True) — TANPA re-run/dispatch baru.
+    Return True bila dikonfirmasi, False bila waktu tunggu habis."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            st = get_task()
+        except Exception:
+            st = {}
+        if bool(st.get("confirmed")):
+            log("✅ Konfirmasi unduhan diterima — melanjutkan unduh penuh di run yang sama.")
+            return True
+        remaining = int(deadline - time.time())
+        if remaining > 0 and remaining % 60 == 0:
+            log(f"⏳ Menunggu konfirmasi unduhan... (sisa {remaining // 60} menit)")
+        time.sleep(CONFIRM_POLL_INTERVAL)
+    log("⏳ Waktu tunggu konfirmasi habis — preview dibatalkan, tidak ada unduhan penuh.")
+    return False
+
+
 def run():
     global task_id
     # GitHub Actions supplies TASK_ID from repository_dispatch/workflow_dispatch.
@@ -654,25 +686,34 @@ def run():
             "mode": "preview",
         }, force=True)
         log("✅ Preview siap. Klik 'Unduh ke Google Drive' untuk mengunduh penuh.")
-        return  # exit 0 — tunggu konfirmasi user
+        # Tunggu konfirmasi user di run yang SAMA (jangan re-dispatch/restart).
+        if not wait_for_confirmation(task_id):
+            return  # exit 0
+        token = get_token(session_token)
+        if not token:
+            report({"status": "Gagal: sesi Drive tidak valid"}, force=True)
+            raise RuntimeError("Sesi Google Drive tidak valid (login ulang) — menandai run GitHub Actions sebagai FAILURE")
+        log("📦 Melanjutkan unduh penuh di run yang sama — progres tidak di-reset.")
+
+    start_pct = 20 if is_preview else 0
 
     tmpdir = "/tmp/runner"
     os.makedirs(tmpdir, exist_ok=True)
     out_path = os.path.join(tmpdir, fname)
 
-    report({"status": "Mengunduh...", "clean_title": title, "percent": 0})
+    report({"status": "Mengunduh...", "clean_title": title, "percent": start_pct})
     total = 0
     if ".m3u8" in cdn.lower():
-        total = download_hls(cdn, out_path, page_url)
+        total = download_hls(cdn, out_path, page_url, start_pct=start_pct)
     else:
-        total = download_direct(cdn, out_path, page_url)
+        total = download_direct(cdn, out_path, page_url, start_pct=start_pct)
     if total < MIN_FILESIZE:
         if os.path.exists(out_path):
             os.remove(out_path)
         raise Exception("Ukuran file terlalu kecil (< 5MB).")
 
-    report({"status": "Mempersiapkan upload ke Drive...", "percent": 0}, force=True)
-    drive_id = upload_drive(out_path, token, session_token)
+    report({"status": "Mempersiapkan upload ke Drive...", "percent": start_pct}, force=True)
+    drive_id = upload_drive(out_path, token, session_token, start_pct=start_pct)
     log(f"✅ File diupload ke Drive (ID: {drive_id})")
 
     thumb = None

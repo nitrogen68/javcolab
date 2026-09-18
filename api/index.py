@@ -28,7 +28,9 @@ from ui.html import get_full_ui
 from ui.modal import get_modals_html
 
 app=FastAPI(title="Remote Uploader",docs_url=None,redoc_url=None)
-APP_VERSION="1.2.1 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
+APP_VERSION="1.3.0 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
+
+GDRIVE_SCOPE="https://www.googleapis.com/auth/drive.file"
 GH_TOKEN=os.environ.get("GH_TOKEN","");GH_REPO=os.environ.get("GH_REPO","");GH_BRANCH=os.environ.get("GH_BRANCH","main")
 API_BASE=os.environ.get("API_BASE","").rstrip("/");WORKER_SECRET=os.environ.get("WORKER_SECRET","")
 GOOGLE_CLIENT_ID=os.environ.get("GOOGLE_CLIENT_ID","");GOOGLE_CLIENT_SECRET=os.environ.get("GOOGLE_CLIENT_SECRET","")
@@ -39,8 +41,10 @@ FERNET=Fernet(base64.urlsafe_b64encode(_ENC[:32]))
 WORKER_WORKFLOW_FILE="puppeter-worker.yml"
 
 def _normalize_gdrive_folder(raw=None):
-    """Normalisasi GDRIVE_FOLDER: hanya nama folder di root Drive (tanpa path/prefix)."""
-    name=os.path.basename((raw or "").strip().strip("/"))
+    """Normalisasi GDRIVE_FOLDER: hanya nama folder di root Drive.
+    Buang prefix 'GDRIVE_FOLDER=' bila secret terlanjur terisi salah."""
+    val=(raw or "").replace("GDRIVE_FOLDER=","").strip().strip("/")
+    name=os.path.basename(val) if val else ""
     if not name or name in (".",".."):return "javColab"
     return name
 
@@ -158,7 +162,7 @@ def load_token(session_token):
 def gdrive_service(session_token):
     token=load_token(session_token)
     if not token:raise HTTPException(status_code=404,detail="Sesi tidak terhubung")
-    creds=Credentials(token=token.get("access_token"),refresh_token=token.get("refresh_token"),token_uri="https://oauth2.googleapis.com/token",client_id=token.get("client_id") or GOOGLE_CLIENT_ID,client_secret=token.get("client_secret") or GOOGLE_CLIENT_SECRET,scopes=["https://www.googleapis.com/auth/drive"])
+    creds=Credentials(token=token.get("access_token"),refresh_token=token.get("refresh_token"),token_uri="https://oauth2.googleapis.com/token",client_id=token.get("client_id") or GOOGLE_CLIENT_ID,client_secret=token.get("client_secret") or GOOGLE_CLIENT_SECRET,scopes=[GDRIVE_SCOPE])
     if creds.expired:creds.refresh(GoogleRequest());token["access_token"]=creds.token;save_token(session_token,token)
     return build("drive","v3",credentials=creds)
 
@@ -240,7 +244,7 @@ def api_poll_token(data:dict):
         token=r.json();import secrets
         session=secrets.token_urlsafe(32);token["client_id"]=GOOGLE_CLIENT_ID;token["client_secret"]=GOOGLE_CLIENT_SECRET;save_token(session,token);email=""
         try:
-            creds=Credentials(token=token.get("access_token"),refresh_token=token.get("refresh_token"),token_uri="https://oauth2.googleapis.com/token",client_id=GOOGLE_CLIENT_ID,client_secret=GOOGLE_CLIENT_SECRET,scopes=["https://www.googleapis.com/auth/drive"]);email=build("drive","v3",credentials=creds).about().get(fields="user(emailAddress)").execute()["user"]["emailAddress"]
+            creds=Credentials(token=token.get("access_token"),refresh_token=token.get("refresh_token"),token_uri="https://oauth2.googleapis.com/token",client_id=GOOGLE_CLIENT_ID,client_secret=GOOGLE_CLIENT_SECRET,scopes=[GDRIVE_SCOPE]);email=build("drive","v3",credentials=creds).about().get(fields="user(emailAddress)").execute()["user"]["emailAddress"]
         except Exception:pass
         _db_ready();upsert_session(session,email);pending_del(code);return {"status":"success","session_token":session,"email":email}
     info=r.json() if r.text else {};err=info.get("error","")
@@ -294,26 +298,19 @@ class ConfirmRequest(BaseModel):
 
 @app.post("/api/download/confirm")
 def confirm_download(req:ConfirmRequest):
-    """Konfirmasi preview → ubah task ke mode=download (confirmed=True) lalu re-dispatch worker."""
+    """Konfirmasi preview → worker yang SAMA (sedang menunggu) melanjutkan unduh
+    penuh tanpa dispatch/re-run baru. Progres berlanjut, tidak di-reset."""
     tid=req.task_id.strip()
     if not tid:raise HTTPException(status_code=400,detail="task_id wajib")
     if not req.session_token:raise HTTPException(status_code=401,detail="Harus login Google Drive dulu")
     _db_ready();current=get_task(tid)
     if not current:raise HTTPException(status_code=404,detail=f"Task {tid} tidak ditemukan")
-    # Hanya skip re-dispatch jika status benar-benar aktif (worker jalan), BUKAN queued stuck.
-    active_statuses=("Memproses","Mengunduh","Mengunggah","Memproses pencarian...","Scheduling")
-    if current.get("status") in active_statuses:
-        return {"status":"started","task_id":tid,"skipped":"already_running","current_status":current.get("status")}
+    if current.get("confirmed"):
+        return {"status":"already_confirmed","task_id":tid,"current_status":current.get("status")}
     meta=dict(current.get("meta") or {});meta["confirmed"]=True;meta["mode"]="download"
-    update_task(tid,meta=meta,session_token=req.session_token,status="queued",message="Menunggu runner (download)...",progress=0)
-    add_log(tid,"✅ Konfirmasi diterima — melanjutkan ke unduh penuh + upload ke Google Drive.")
-    try:
-        info=dispatch_repo("jav-task",{"task_id":tid})
-        add_log(tid,f"✅ Dispatch download via {info.get('method')} HTTP {info.get('status')} — cek tab Actions (Puppeter Worker)")
-        update_task(tid,status="queued",message=f"Menunggu runner ({info.get('method')})...")
-    except Exception as e:
-        update_task(tid,status="Gagal: scheduling",message=f"Gagal dispatch GitHub Actions: {e}",error=str(e));add_log(tid,f"❌ {e}","error");raise HTTPException(status_code=500,detail=f"Gagal dispatch: {e}")
-    return {"status":"started","task_id":tid,"dispatch":info}
+    update_task(tid,meta=meta,session_token=req.session_token,status="Memproses unduhan...",message="Konfirmasi diterima — mendownload penuh...",progress=20)
+    add_log(tid,"✅ Konfirmasi diterima — worker melanjutkan unduh penuh tanpa restart.")
+    return {"status":"confirmed","task_id":tid,"confirmed":True}
 
 class ReportBody(BaseModel):
     task_id:str;task:dict={};history_item:dict|None=None
