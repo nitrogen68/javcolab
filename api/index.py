@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -27,12 +28,15 @@ from ui.html import get_full_ui
 from ui.modal import get_modals_html
 
 app=FastAPI(title="Remote Uploader",docs_url=None,redoc_url=None)
-APP_VERSION="1.1.2 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
+APP_VERSION="1.1.3 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
 GH_TOKEN=os.environ.get("GH_TOKEN","");GH_REPO=os.environ.get("GH_REPO","");GH_BRANCH=os.environ.get("GH_BRANCH","main")
 API_BASE=os.environ.get("API_BASE","").rstrip("/");WORKER_SECRET=os.environ.get("WORKER_SECRET","");GDRIVE_FOLDER=os.environ.get("GDRIVE_FOLDER","javColab")
 GOOGLE_CLIENT_ID=os.environ.get("GOOGLE_CLIENT_ID","");GOOGLE_CLIENT_SECRET=os.environ.get("GOOGLE_CLIENT_SECRET","")
 _ENC=os.environ.get("API_ENC_KEY","").encode() or hashlib.sha256(((WORKER_SECRET or "puppeter")+"::enc").encode()).digest()
 FERNET=Fernet(base64.urlsafe_b64encode(_ENC[:32]))
+
+# Nama file workflow worker (harus cocok dengan path di repo)
+WORKER_WORKFLOW_FILE="puppeter-worker.yml"
 
 
 def _db_ready():
@@ -69,28 +73,77 @@ def gh_delete(path):
     return r.status_code in (200,204)
 
 def dispatch_repo(event_type,payload):
+    """Trigger GitHub Actions worker.
+
+    Prefer workflow_dispatch (eksplisit ke puppeter-worker.yml) karena lebih andal
+    daripada repository_dispatch yang kadang tidak memunculkan run.
+    Fallback ke repository_dispatch jika workflow_dispatch gagal.
+    """
     if not GH_TOKEN:
         raise RuntimeError("GH_TOKEN kosong di environment Vercel — tidak bisa memicu GitHub Actions")
     if not GH_REPO:
         raise RuntimeError("GH_REPO kosong di environment Vercel — set contoh: nitrogen68/puppeter-web")
-    url=f"https://api.github.com/repos/{GH_REPO}/dispatches"
-    body={"event_type":event_type,"client_payload":payload or {}}
-    r=requests.post(url,headers=_gh_headers(),json=body,timeout=20)
-    # 204 No Content = sukses untuk repository_dispatch
-    if r.status_code not in (200,201,204):
-        raise RuntimeError(f"dispatch {event_type} gagal: HTTP {r.status_code} | repo={GH_REPO} | {r.text[:300]}")
+
+    task_id=str((payload or {}).get("task_id") or "").strip()
+    errors=[]
+
+    # 1) Primary: workflow_dispatch ke file workflow worker
+    wd_url=f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{WORKER_WORKFLOW_FILE}/dispatches"
+    wd_body={"ref":GH_BRANCH or "main","inputs":{"task_id":task_id}}
+    try:
+        r=requests.post(wd_url,headers=_gh_headers(),json=wd_body,timeout=20)
+        if r.status_code in (200,201,204):
+            return {"method":"workflow_dispatch","status":r.status_code}
+        errors.append(f"workflow_dispatch HTTP {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        errors.append(f"workflow_dispatch exception: {e}")
+
+    # 2) Fallback: repository_dispatch (event_type)
+    rd_url=f"https://api.github.com/repos/{GH_REPO}/dispatches"
+    rd_body={"event_type":event_type,"client_payload":payload or {}}
+    try:
+        r=requests.post(rd_url,headers=_gh_headers(),json=rd_body,timeout=20)
+        if r.status_code in (200,201,204):
+            return {"method":"repository_dispatch","status":r.status_code}
+        errors.append(f"repository_dispatch HTTP {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        errors.append(f"repository_dispatch exception: {e}")
+
+    raise RuntimeError(
+        f"Gagal memicu worker (task_id={task_id!r}) repo={GH_REPO}. "
+        + " | ".join(errors)
+        + " — pastikan GH_TOKEN punya scope 'repo' + 'workflow', dan workflow file ada di branch main."
+    )
 
 def require_worker(req:Request):
     sec=(req.headers.get("x-worker-secret") or "").strip()
     bearer=(req.headers.get("authorization") or "").strip()
     gh_bearer=bearer[7:].strip() if bearer.lower().startswith("bearer ") else ""
-    if WORKER_SECRET and sec==WORKER_SECRET:
-        return
-    if GH_TOKEN and gh_bearer==GH_TOKEN:
-        return
-    raise HTTPException(status_code=401,detail="Worker authentication salah")
+    # Jika WORKER_SECRET di-set di Vercel, wajib cocok
+    if WORKER_SECRET:
+        if sec==WORKER_SECRET:
+            return
+        # Fallback: Bearer = GH_TOKEN (PAT yang sama)
+        if GH_TOKEN and gh_bearer==GH_TOKEN:
+            return
+        raise HTTPException(status_code=401,detail="Worker authentication salah (WORKER_SECRET / GH_TOKEN tidak cocok)")
+    # Mode longgar: jika WORKER_SECRET belum di-set di Vercel, terima request ber-header apapun
+    # (hanya untuk bootstrap; sebaiknya tetap di-set)
+    return
 
 def wib_time():return datetime.now(timezone(timedelta(hours=7))).strftime("%d %b %Y %H:%M WIB")
+
+def _normalize_code(raw:str)->str:
+    """Bersihkan input user dari karakter sisa copy-paste."""
+    s=(raw or "").strip()
+    # Buang trailing penutup yang tidak seimbang: ) ] } " '
+    while s and s[-1] in ")]}\"'" and s.count("(") < s.count(")"):
+        s=s[:-1].rstrip()
+    while s and s[-1] in ")]}\"'" and s.count("[") < s.count("]"):
+        s=s[:-1].rstrip()
+    # Karakter kontrol / whitespace berlebih
+    s=re.sub(r"\s+"," ",s).strip()
+    return s
 
 TOKEN_DIR="data/tokens";PENDING_DIR="data/pending"
 def save_token(session_token,token_json):
@@ -130,6 +183,8 @@ def health():
         "playwright":"chromium",
         "gh_repo":bool(GH_REPO),
         "gh_token":bool(GH_TOKEN),
+        "worker_secret":bool(WORKER_SECRET),
+        "workflow":WORKER_WORKFLOW_FILE,
     }
 
 @app.get("/api/saran_random")
@@ -195,13 +250,11 @@ class DownloadRequest(BaseModel):
 
 @app.post("/api/download")
 def process_download(req:DownloadRequest):
-    raw=req.url.strip()
-    # Normalisasi input kode agar karakter penutup yang tidak sengaja ikut ter-submit
-    # tidak menjadi bagian dari task_id dan payload repository_dispatch.
-    if raw.endswith(")") and raw.count("(") < raw.count(")"):
-        raw=raw[:-1].rstrip()
+    raw=_normalize_code(req.url)
     if not raw:raise HTTPException(status_code=400,detail="Input kosong")
     if raw.startswith(("http://","https://")):raise HTTPException(status_code=400,detail="Masukkan kode pencarian, bukan URL!")
+    if not req.session_token:
+        raise HTTPException(status_code=401,detail="Harus login Google Drive dulu sebelum unduh")
     _db_ready();email=get_session_email(req.session_token) if req.session_token else "";dupe=find_history_duplicate(raw,email) if email else None
     if dupe:
         create_task(raw,raw,req.session_token,{"clean_title":dupe.get("name",raw),"status_text":"Sudah ada di riwayat, unduhan dilewati."});update_task(raw,status="Selesai",progress=100,message="Sudah ada di riwayat",completed_at=datetime.now(timezone.utc));add_log(raw,f"✅ [DUPLIKAT] '{dupe.get('name',raw)}' sudah ada. Melewati unduhan.");return {"status":"started","task_id":raw}
@@ -209,12 +262,12 @@ def process_download(req:DownloadRequest):
     if existing and existing.get("status") in ("Memproses","Mengunduh","Mengunggah","Scheduling","queued"):return {"status":"started","task_id":raw}
     create_task(raw,raw,req.session_token,{"clean_title":"","status_text":"Menunggu worker GitHub Actions...","created":wib_time()});add_log(raw,"⏳ Menjadwalkan ke GitHub Actions...")
     try:
-        dispatch_repo("jav-task",{"task_id":raw})
-        add_log(raw,"✅ Dispatch repository_dispatch(jav-task) berhasil — cek tab Actions")
+        info=dispatch_repo("jav-task",{"task_id":raw})
+        add_log(raw,f"✅ Dispatch berhasil via {info.get('method')} — cek tab Actions (Puppeter Worker)")
         update_task(raw,status="queued",message="Menunggu runner GitHub Actions...")
     except Exception as e:
         update_task(raw,status="Gagal: scheduling",message=f"Gagal dispatch GitHub Actions: {e}",error=str(e));add_log(raw,f"❌ {e}","error");raise HTTPException(status_code=500,detail=f"Gagal dispatch: {e}")
-    return {"status":"started","task_id":raw}
+    return {"status":"started","task_id":raw,"dispatch":info}
 
 class ReportBody(BaseModel):
     task_id:str;task:dict={};history_item:dict|None=None
