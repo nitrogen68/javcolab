@@ -28,7 +28,7 @@ from ui.html import get_full_ui
 from ui.modal import get_modals_html
 
 app=FastAPI(title="Remote Uploader",docs_url=None,redoc_url=None)
-APP_VERSION="1.1.3 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
+APP_VERSION="1.1.4 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
 GH_TOKEN=os.environ.get("GH_TOKEN","");GH_REPO=os.environ.get("GH_REPO","");GH_BRANCH=os.environ.get("GH_BRANCH","main")
 API_BASE=os.environ.get("API_BASE","").rstrip("/");WORKER_SECRET=os.environ.get("WORKER_SECRET","");GDRIVE_FOLDER=os.environ.get("GDRIVE_FOLDER","javColab")
 GOOGLE_CLIENT_ID=os.environ.get("GOOGLE_CLIENT_ID","");GOOGLE_CLIENT_SECRET=os.environ.get("GOOGLE_CLIENT_SECRET","")
@@ -119,29 +119,22 @@ def require_worker(req:Request):
     sec=(req.headers.get("x-worker-secret") or "").strip()
     bearer=(req.headers.get("authorization") or "").strip()
     gh_bearer=bearer[7:].strip() if bearer.lower().startswith("bearer ") else ""
-    # Jika WORKER_SECRET di-set di Vercel, wajib cocok
     if WORKER_SECRET:
         if sec==WORKER_SECRET:
             return
-        # Fallback: Bearer = GH_TOKEN (PAT yang sama)
         if GH_TOKEN and gh_bearer==GH_TOKEN:
             return
         raise HTTPException(status_code=401,detail="Worker authentication salah (WORKER_SECRET / GH_TOKEN tidak cocok)")
-    # Mode longgar: jika WORKER_SECRET belum di-set di Vercel, terima request ber-header apapun
-    # (hanya untuk bootstrap; sebaiknya tetap di-set)
     return
 
 def wib_time():return datetime.now(timezone(timedelta(hours=7))).strftime("%d %b %Y %H:%M WIB")
 
 def _normalize_code(raw:str)->str:
-    """Bersihkan input user dari karakter sisa copy-paste."""
     s=(raw or "").strip()
-    # Buang trailing penutup yang tidak seimbang: ) ] } " '
     while s and s[-1] in ")]}\"'" and s.count("(") < s.count(")"):
         s=s[:-1].rstrip()
     while s and s[-1] in ")]}\"'" and s.count("[") < s.count("]"):
         s=s[:-1].rstrip()
-    # Karakter kontrol / whitespace berlebih
     s=re.sub(r"\s+"," ",s).strip()
     return s
 
@@ -171,6 +164,17 @@ def pending_save(code,obj):gh_put(f"{PENDING_DIR}/{code}.json",base64.b64encode(
 def pending_load(code):
     b64,sha=gh_get(f"{PENDING_DIR}/{code}.json");return (json.loads(base64.b64decode(b64).decode()),sha) if b64 else (None,None)
 def pending_del(code):gh_delete(f"{PENDING_DIR}/{code}.json")
+
+@app.post("/api/debug/dispatch")
+def debug_dispatch(body:dict|None=None):
+    """Uji trigger worker tanpa full download flow."""
+    body=body or {}
+    tid=str(body.get("task_id") or f"debug-{int(time.time())}").strip()
+    try:
+        info=dispatch_repo("jav-task",{"task_id":tid})
+        return {"ok":True,"task_id":tid,"dispatch":info,"gh_repo":GH_REPO,"gh_token_set":bool(GH_TOKEN)}
+    except Exception as e:
+        raise HTTPException(status_code=500,detail=str(e))
 
 @app.get("/api/health")
 def health():
@@ -257,14 +261,20 @@ def process_download(req:DownloadRequest):
         raise HTTPException(status_code=401,detail="Harus login Google Drive dulu sebelum unduh")
     _db_ready();email=get_session_email(req.session_token) if req.session_token else "";dupe=find_history_duplicate(raw,email) if email else None
     if dupe:
-        create_task(raw,raw,req.session_token,{"clean_title":dupe.get("name",raw),"status_text":"Sudah ada di riwayat, unduhan dilewati."});update_task(raw,status="Selesai",progress=100,message="Sudah ada di riwayat",completed_at=datetime.now(timezone.utc));add_log(raw,f"✅ [DUPLIKAT] '{dupe.get('name',raw)}' sudah ada. Melewati unduhan.");return {"status":"started","task_id":raw}
+        create_task(raw,raw,req.session_token,{"clean_title":dupe.get("name",raw),"status_text":"Sudah ada di riwayat, unduhan dilewati."});update_task(raw,status="Selesai",progress=100,message="Sudah ada di riwayat",completed_at=datetime.now(timezone.utc));add_log(raw,f"✅ [DUPLIKAT] '{dupe.get('name',raw)}' sudah ada. Melewati unduhan.");return {"status":"started","task_id":raw,"skipped":"duplicate"}
+    # Hanya skip dispatch jika worker BENAR-BENAR sedang jalan (bukan queued yang bisa stuck)
     existing=get_task(raw)
-    if existing and existing.get("status") in ("Memproses","Mengunduh","Mengunggah","Scheduling","queued"):return {"status":"started","task_id":raw}
-    create_task(raw,raw,req.session_token,{"clean_title":"","status_text":"Menunggu worker GitHub Actions...","created":wib_time()});add_log(raw,"⏳ Menjadwalkan ke GitHub Actions...")
+    active_statuses=("Memproses","Mengunduh","Mengunggah","Memproses pencarian...")
+    if existing and existing.get("status") in active_statuses:
+        return {"status":"started","task_id":raw,"skipped":"already_running","current_status":existing.get("status")}
+    # Selalu buat/update task + dispatch ulang (queued/gagal/selesai lama → coba lagi)
+    create_task(raw,raw,req.session_token,{"clean_title":"","status_text":"Menunggu worker GitHub Actions...","created":wib_time()})
+    add_log(raw,"⏳ Menjadwalkan ke GitHub Actions...")
+    update_task(raw,status="Scheduling",message="Memicu GitHub Actions...",session_token=req.session_token)
     try:
         info=dispatch_repo("jav-task",{"task_id":raw})
-        add_log(raw,f"✅ Dispatch berhasil via {info.get('method')} — cek tab Actions (Puppeter Worker)")
-        update_task(raw,status="queued",message="Menunggu runner GitHub Actions...")
+        add_log(raw,f"✅ Dispatch berhasil via {info.get('method')} HTTP {info.get('status')} — cek tab Actions (Puppeter Worker)")
+        update_task(raw,status="queued",message=f"Menunggu runner ({info.get('method')})...")
     except Exception as e:
         update_task(raw,status="Gagal: scheduling",message=f"Gagal dispatch GitHub Actions: {e}",error=str(e));add_log(raw,f"❌ {e}","error");raise HTTPException(status_code=500,detail=f"Gagal dispatch: {e}")
     return {"status":"started","task_id":raw,"dispatch":info}
