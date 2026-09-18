@@ -28,7 +28,7 @@ from ui.html import get_full_ui
 from ui.modal import get_modals_html
 
 app=FastAPI(title="Remote Uploader",docs_url=None,redoc_url=None)
-APP_VERSION="1.2.0 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
+APP_VERSION="1.2.1 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
 GH_TOKEN=os.environ.get("GH_TOKEN","");GH_REPO=os.environ.get("GH_REPO","");GH_BRANCH=os.environ.get("GH_BRANCH","main")
 API_BASE=os.environ.get("API_BASE","").rstrip("/");WORKER_SECRET=os.environ.get("WORKER_SECRET","")
 GOOGLE_CLIENT_ID=os.environ.get("GOOGLE_CLIENT_ID","");GOOGLE_CLIENT_SECRET=os.environ.get("GOOGLE_CLIENT_SECRET","")
@@ -386,11 +386,6 @@ class AutomationBody(BaseModel):
 @app.get("/api/automation")
 def automation_list(request:Request):
     require_worker(request);_db_ready();return list_automations()
-
-@app.get("/api/automations")
-def automations_public():
-    """List automations dari PostgreSQL (publik, tanpa worker secret)."""
-    _db_ready();items=list_automations();return {"ok":True,"items":items,"count":len(items)}
 
 @app.post("/api/automation")
 def automation_save(body:AutomationBody,request:Request):

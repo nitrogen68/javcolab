@@ -57,7 +57,6 @@ def get_full_ui(app_version, modals_html):
             <div class="flex gap-6 border-b border-[#334155] mb-6">
                 <button data-tab="upload" class="tab-btn active pb-3 font-semibold text-sm tracking-wide">Upload Baru</button>
                 <button data-tab="history" class="tab-btn pb-3 font-semibold text-sm tracking-wide">Riwayat Unduhan</button>
-                <button data-tab="automation" class="tab-btn pb-3 font-semibold text-sm tracking-wide">Automation</button>
             </div>
             
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -138,19 +137,6 @@ def get_full_ui(app_version, modals_html):
                 </div>
             </div>
             
-            <div id="automationPanel" class="card p-4 sm:p-6 mt-6 hidden">
-                <div class="flex justify-between items-center mb-5">
-                    <h2 class="font-bold text-white text-lg tracking-tight">🤖 Automation</h2>
-                    <button onclick="loadAutomations()" class="text-xs font-semibold bg-[#334155] hover:bg-[#475569] text-white px-4 py-2 rounded-lg border border-[#475569] transition">🔄 Refresh</button>
-                </div>
-                <div id="automationList" class="space-y-3">
-                    <div class="flex flex-col items-center justify-center h-40 text-center">
-                        <span class="text-4xl mb-2 opacity-50">🤖</span>
-                        <p class="text-[#64748B] text-sm">Memuat automation...</p>
-                    </div>
-                </div>
-            </div>
-
             <div id="driveStatusContainer" class="mt-6 flex flex-col md:flex-row items-center justify-center bg-[#1E293B] border border-[#334155] rounded-xl p-5 gap-4 md:gap-8 relative overflow-visible">
                 <div class="flex flex-col items-center justify-center min-w-0 text-center">
                     <svg id="driveIconSvg" class="w-10 h-10 text-gray-400 cursor-pointer transition hover:scale-110 mb-2 drop-shadow-md" fill="currentColor" viewBox="0 0 24 24" onclick="toggleDriveStatus()">
@@ -278,7 +264,6 @@ def get_full_ui(app_version, modals_html):
                 document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
                 document.getElementById('uploadPanel').classList.toggle('hidden', t !== 'upload');
                 document.getElementById('historyPanel').classList.toggle('hidden', t !== 'history');
-                document.getElementById('automationPanel').classList.toggle('hidden', t !== 'automation');
                 
                 const driveContainer = document.getElementById('driveStatusContainer');
                 if (driveContainer) {
@@ -286,7 +271,6 @@ def get_full_ui(app_version, modals_html):
                 }
 
                 if (t === 'history') loadHistory();
-                if (t === 'automation') loadAutomations();
             }
 
             function formatBytes(b) {
@@ -894,54 +878,6 @@ def get_full_ui(app_version, modals_html):
                 if (sessionToken) { openLogoutModal(); } 
                 else { startAuthFlow(); }
             });
-
-            // ===== AUTOMATION (DARI DATABASE) =====
-            async function loadAutomations() {
-                const list = document.getElementById('automationList');
-                if (!list) return;
-                try {
-                    list.innerHTML = '<div class="flex flex-col items-center justify-center h-40 text-center"><span class="text-4xl mb-2 opacity-50 animate-spin" style="width:1.5rem;height:1.5rem;font-size:1.5rem">⏳</span><p class="text-[#64748B] text-sm">Memuat automation...</p></div>';
-                    const res = await fetch('/api/automations');
-                    if (!res.ok) throw new Error(`HTTP Error ${res.status}: ${await res.text()}`);
-                    const data = await res.json();
-                    const items = data.items || [];
-
-                    if (!items.length) {
-                        list.innerHTML = '<div class="flex flex-col items-center justify-center h-40 text-center"><span class="text-4xl mb-2 opacity-50">🤖</span><p class="text-[#64748B] text-sm">Belum ada automation. Buat di database (automations table).</p></div>';
-                        return;
-                    }
-
-                    list.innerHTML = items.map(a => {
-                        const cfg = a.config ? JSON.stringify(a.config) : '{}';
-                        const enabled = a.enabled
-                            ? '<span class="px-2 py-0.5 bg-emerald-500/10 text-emerald-400 border-emerald-500/20 border rounded text-[10px] font-bold uppercase">Aktif</span>'
-                            : '<span class="px-2 py-0.5 bg-gray-500/10 text-gray-400 border-gray-600/30 border rounded text-[10px] font-bold uppercase">Nonaktif</span>';
-                        return `<div class="p-4 bg-[#1E293B] hover:bg-[#283548] border border-[#334155] rounded-xl transition-all">
-                            <div class="flex flex-wrap items-center justify-between gap-2">
-                                <div class="flex items-center gap-3 min-w-0">
-                                    <span class="text-xs font-mono text-[#14B8A6] bg-[#0F172A] px-2 py-1 rounded-lg border border-[#334155]">#${a.id}</span>
-                                    <h4 class="font-bold text-sm text-white truncate">${escapeHtml(a.name)}</h4>
-                                    ${enabled}
-                                </div>
-                                <div class="flex items-center gap-2 text-[11px] font-mono text-[#94A3B8]">
-                                    <span class="px-2 py-0.5 bg-[#0F172A] rounded-lg border border-[#334155]">setiap ${a.interval_minutes} menit</span>
-                                    <span class="px-2 py-0.5 bg-[#0F172A] rounded-lg border border-[#334155]">${escapeHtml(a.action)}</span>
-                                </div>
-                            </div>
-                            <div class="mt-2 text-[11px] text-[#94A3B8] font-mono bg-[#0A0F1C] rounded-lg border border-[#334155] p-2 break-all">config: ${escapeHtml(cfg)}</div>
-                            <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-1 text-[11px] text-[#64748B]">
-                                <span>Terakhir jalan: ${escapeHtml(a.last_run_at || '—')}</span>
-                                <span>Jalan lagi: ${escapeHtml(a.next_run_at || '—')}</span>
-                                <span>Dibuat: ${escapeHtml(a.created_at || '—')}</span>
-                                <span>Diperbarui: ${escapeHtml(a.updated_at || '—')}</span>
-                            </div>
-                        </div>`;
-                    }).join('');
-                } catch (err) {
-                    console.error('[API Error] Gagal memuat automation:', err);
-                    list.innerHTML = `<div class="text-center text-red-400 mt-4 p-4 bg-red-950/30 rounded-xl border border-red-900/50">❌ Gagal memuat automation.<br><span class="text-xs text-red-500/80">${escapeHtml(err.message)}</span></div>`;
-                }
-            }
 
             checkDriveStatus();
         </script>

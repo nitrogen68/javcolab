@@ -484,11 +484,64 @@ def thumb_gh_name(filename):
     return hashlib.sha256(filename.encode()).hexdigest()[:16] + ".jpg"
 
 
+def peek_media_size(cdn, referer=None):
+    """Cukup intip header CDN untuk tahu ukuran video — TANPA unduh penuh.
+    HEAD dulu, fallback GET Range bytes=0-0 (Content-Range), lalu content-length."""
+    hdr = {"User-Agent": "Mozilla/5.0"}
+    if referer:
+        hdr["Referer"] = referer
+    try:
+        rh = requests.get(cdn, headers=hdr, timeout=25, verify=False,
+                          allow_redirects=True, stream=True)
+        rh.close()
+        b = int(rh.headers.get("content-length") or 0)
+        if b:
+            return format_size(b)
+    except Exception as e:
+        log(f"⚠️ Preview size error (HEAD): {e}")
+    try:
+        rg = requests.get(cdn, headers=dict(hdr, Range="bytes=0-0"), timeout=25,
+                          verify=False, allow_redirects=True, stream=True)
+        rg.close()
+        cr = rg.headers.get("content-range", "")
+        m = re.search(r"/(\d+)\s*$", cr)
+        if m and int(m.group(1)):
+            return format_size(int(m.group(1)))
+        b = int(rg.headers.get("content-length") or 0)
+        if b:
+            return format_size(b)
+    except Exception as e:
+        log(f"⚠️ Preview size error (Range): {e}")
+    return "—"
+
+
+def probe_media_duration(cdn, referer=None):
+    """Durasi akurat via ffprobe (baca metadata/playlist saja, tidak unduh penuh).
+    Fallback: string kosong → dipakai durasi dari meta halaman."""
+    try:
+        cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+               "-of", "default=nw=1:nk=1"]
+        if referer:
+            cmd += ["-headers", f"Referer: {referer}\r\nUser-Agent: Mozilla/5.0\r\n"]
+        cmd += [cdn]
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
+        s = out.stdout.strip()
+        dur = float(s)
+        if dur > 0:
+            hh, rem = divmod(int(dur), 3600)
+            mi, ss = divmod(rem, 60)
+            return f"{hh}:{mi:02d}:{ss:02d}"
+    except Exception as e:
+        log(f"⚠️ Probe duration error: {e}")
+    return ""
+
+
 def fetch_preview_metadata(page_url, cdn, title):
     """Scrape metadata untuk preview TANPA mengunduh penuh:
-    thumb (og:image / video poster), size (HEAD CDN jika mp4, selain itu '—'),
-    duration (dari meta halaman jika ada)."""
+    thumb (og:image / video poster), size (HEAD/Range CDN — intip header saja),
+    duration (ffprobe; fallback durasi dari meta halaman)."""
     preview = {"title": title or "", "filename": "", "thumb": "", "size": "—", "duration": ""}
+    html_dur = ""
     try:
         r = requests.get(page_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20, verify=False)
         if r.status_code == 200:
@@ -523,18 +576,15 @@ def fetch_preview_metadata(page_url, cdn, title):
             if dur:
                 hh, rem = divmod(dur, 3600)
                 mi, ss = divmod(rem, 60)
-                preview["duration"] = f"{hh}:{mi:02d}:{ss:02d}"
+                html_dur = f"{hh}:{mi:02d}:{ss:02d}"
     except Exception as e:
         log(f"⚠️ Preview metadata error: {e}")
-    if cdn and ".mp4" in cdn.lower():
-        try:
-            rh = requests.head(cdn, headers={"User-Agent": "Mozilla/5.0"},
-                               timeout=20, verify=False, allow_redirects=True)
-            b = int(rh.headers.get("content-length") or 0)
-            if b:
-                preview["size"] = format_size(b)
-        except Exception as e:
-            log(f"⚠️ Preview size error: {e}")
+    if cdn:
+        preview["size"] = peek_media_size(cdn, page_url)
+        duration = probe_media_duration(cdn, page_url)
+        preview["duration"] = duration or html_dur
+    else:
+        preview["duration"] = html_dur
     return preview
 
 
