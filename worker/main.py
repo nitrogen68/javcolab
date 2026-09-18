@@ -687,7 +687,7 @@ def run():
         }, force=True)
         log("✅ Preview siap. Klik 'Unduh ke Google Drive' untuk mengunduh penuh.")
         # Tunggu konfirmasi user di run yang SAMA (jangan re-dispatch/restart).
-        if not wait_for_confirmation(task_id):
+        if not wait_for_confirmation():
             return  # exit 0
         token = get_token(session_token)
         if not token:
