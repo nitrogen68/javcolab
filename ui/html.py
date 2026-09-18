@@ -117,6 +117,7 @@ def get_full_ui(app_version, modals_html):
                                     <span id="previewFname" class="px-2 py-1 bg-[#0F172A] text-[#94A3B8] rounded-lg border border-[#334155] font-mono truncate max-w-full">File: -</span>
                                 </div>
                                 <button id="confirmDownloadBtn" class="mt-4 w-full sm:w-auto px-6 h-12 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 text-white font-bold rounded-xl shadow-lg shadow-emerald-900/30">⬇️ Unduh ke Google Drive</button>
+                                <button id="resetBtn" class="mt-2 w-full sm:w-auto px-6 h-11 bg-gradient-to-r from-red-600 to-orange-500 hover:from-red-700 hover:to-orange-600 text-white font-bold rounded-xl shadow-lg shadow-red-900/30">🔄 Reset & Mulai Tugas Baru</button>
                             </div>
                         </div>
                     </div>
@@ -540,6 +541,45 @@ def get_full_ui(app_version, modals_html):
                     document.getElementById('previewPanel').classList.remove('hidden');
                 }
             });
+            
+            // ===== RESET: bersihkan progress UI & mulakan tugas baru =====
+            function resetTask() {
+                clearInterval(pollTimer);
+                pollTimer = null;
+                isDownloading = false;
+                currentTaskId = '';
+                try { localStorage.removeItem(PTASK_KEY); } catch (e) {}
+
+                const progressPanel = document.getElementById('progressPanel');
+                progressPanel.className = "mt-6 bg-[#1E293B] border border-[#334155] rounded-xl overflow-hidden shadow-xl";
+                progressPanel.classList.remove('hidden', 'opacity-0');
+                document.getElementById('previewPanel').classList.add('hidden');
+
+                document.getElementById('pBar').className = "progress-bar bg-gradient-to-r from-[#0D9488] to-[#14B8A6] h-full rounded-full relative";
+                document.getElementById('pBar').style.width = '0%';
+                document.getElementById('pPercent').innerText = '0%';
+                document.getElementById('pStatus').className = "font-medium bg-[#0F172A] text-[#94A3B8] px-3 py-1.5 rounded-lg border border-[#334155] inline-block truncate";
+                document.getElementById('pStatus').innerText = 'Menyiapkan...';
+                document.getElementById('pSpinner').classList.remove('hidden');
+                document.getElementById('pMeta').innerText = 'Size: 0 B • Speed: 0 KB/s';
+                document.getElementById('pFile').innerText = 'Memproses...';
+                document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> System initialized...</div>';
+
+                const submitBtn = document.getElementById('submitBtn');
+                submitBtn.disabled = false; submitBtn.innerText = 'Mulai Pencarian & Unduh'; submitBtn.classList.remove('opacity-75');
+
+                const confirmBtn = document.getElementById('confirmDownloadBtn');
+                confirmBtn.disabled = false; confirmBtn.innerText = '⬇️ Unduh ke Google Drive'; confirmBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+
+                const input = document.getElementById('urlInput');
+                if (input) { input.value = ''; input.focus(); }
+                const errorMsg = document.getElementById('errorMsg');
+                if (errorMsg) errorMsg.classList.add('hidden');
+                const autoContainer = document.getElementById('autoSuggestContainer');
+                if (autoContainer) autoContainer.classList.add('hidden');
+            }
+
+            document.getElementById('resetBtn').addEventListener('click', resetTask);
             
             // 🟢 LOAD HISTORY DENGAN TOMBOL VIEW (STREAMING MANUAL KE DRIVE) DI BAWAH TOMBOL DELETE
             async function loadHistory() {
