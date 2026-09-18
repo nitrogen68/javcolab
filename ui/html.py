@@ -329,11 +329,13 @@ def get_full_ui(app_version, modals_html):
                         const results = data.results || [];
                         if (results.length > 0) {
                             autoList.innerHTML = results.map(r => {
-                                const code = (r.code || r.name || '').trim();
-                                const label = (r.code && r.name && r.name !== r.code) ? `${r.name} — ${r.code}` : (r.code || r.name);
+                                const code = (r.code || r.id || r.name || '').trim();
+                                const title = r.title || '';
+                                const thumb = r.thumb || '';
                                 const safeCode = escapeHtml(code);
-                                const safeLabel = escapeHtml(label);
-                                return `<button type="button" data-auto-code="${safeCode}" class="text-left w-full px-3 py-2.5 rounded-lg bg-[#0F172A] border border-[#334155] hover:border-[#14B8A6] hover:bg-[#1a2742] text-sm text-[#E2E8F0] transition flex items-center gap-2"><svg class="w-4 h-4 text-[#14B8A6] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg><span>${safeLabel}</span></button>`;
+                                const safeTitle = escapeHtml(title);
+                                const thumbHtml = thumb ? `<img src="${escapeHtml(thumb)}" class="w-9 h-9 rounded-md object-cover border border-[#334155] shrink-0" onerror="this.style.display='none'">` : `<div class="w-9 h-9 rounded-md bg-[#334155] flex items-center justify-center text-sm shrink-0">🎬</div>`;
+                                return `<button type="button" data-auto-code="${safeCode}" class="text-left w-full px-3 py-2 rounded-lg bg-[#0F172A] border border-[#334155] hover:border-[#14B8A6] hover:bg-[#1a2742] text-sm text-[#E2E8F0] transition flex items-center gap-3">${thumbHtml}<span class="min-w-0"><span class="block font-mono font-bold text-[#14B8A6]">${safeCode}</span>${safeTitle ? `<span class="block text-xs text-[#94A3B8] truncate">${safeTitle}</span>` : ''}</span></button>`;
                             }).join('');
                             autoContainer.classList.remove('hidden');
                         } else { autoContainer.classList.add('hidden'); autoList.innerHTML = ''; }

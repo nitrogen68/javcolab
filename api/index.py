@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db import (init_db, create_task, update_task, add_log, get_task, upsert_session,
     get_session_email, upsert_history, list_history, delete_history, clear_history,
     find_history_duplicate, list_automations, upsert_automation, due_automations,
-    mark_automation_run, db_check, search_automations)
+    mark_automation_run, db_check, search_automations, autodb_status)
 from ui.html import get_full_ui
 from ui.modal import get_modals_html
 
@@ -206,15 +206,17 @@ def health():
 
 @app.get("/api/db/check")
 def api_db_check():
-    """Cek endpoint khusus: pastikan semua database/tabel terload dengan normal."""
+    """Cek endpoint khusus: pastikan semua database terload (Postgres + automation DB)."""
     _db_ready()
-    status,ok=db_check()
-    return {"ok":ok,"status":"loaded" if ok else "missing","tables":status,"app":APP_VERSION}
+    tables,tok=db_check()
+    autodbs,autook=autodb_status()
+    ok=tok and autook
+    return {"ok":ok,"status":"loaded" if ok else "missing","tables":tables,"databases":autodbs,"app":APP_VERSION}
 
 @app.get("/api/automation/search")
 def api_automation_search(q:str=""):
-    """Cari automation yang cocok dari database automation (nama atau kode config).
-    Dipakai UI untuk autocomplete — mis. ketik 'vem' → 'Vema-344', 'Vema-765'."""
+    """Cari kode dari automation DB (search_logs / javDbs.db).
+    Dipakai UI untuk autocomplete — mis. ketik 'vem' → VEMA-101…VEMA-258."""
     _db_ready()
     q=(q or "").strip()
     return {"ok":True,"query":q,"results":search_automations(q)}

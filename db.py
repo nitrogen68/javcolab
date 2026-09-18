@@ -1,10 +1,13 @@
 import json
 import os
+import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 DATABASE_URL=os.getenv("DATABASE_URL","").strip()
+BASE_DIR=os.path.dirname(os.path.abspath(__file__))
+AUTODB_PATH=os.path.join(BASE_DIR,"data","javDbs.db")
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -128,20 +131,58 @@ def db_check():
             ok=False
     return status,ok
 
+def _autodb():
+    """Buka automation database (SQLite javDbs.db) secara read-only."""
+    if not os.path.exists(AUTODB_PATH):
+        raise RuntimeError(f"Automation DB tidak ditemukan: {AUTODB_PATH}")
+    con=sqlite3.connect(f"file:{AUTODB_PATH}?mode=ro",uri=True,check_same_thread=False)
+    con.row_factory=sqlite3.Row
+    return con
+
+def autodb_status():
+    """Cek apakah seluruh database/tabel dalam automation DB (javDbs.db) terload."""
+    dbs,ok={},True
+    try:
+        con=_autodb();cur=con.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        tables=[r[0] for r in cur.fetchall()]
+        integ=None
+        try: integ=cur.execute("PRAGMA integrity_check").fetchone()[0]
+        except Exception as e: integ=f"error:{e}";ok=False
+        for t in tables:
+            try:
+                cnt=cur.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+                dbs[t]={"loaded":True,"rows":cnt}
+            except Exception as e:
+                dbs[t]={"loaded":False,"error":str(e)};ok=False
+        con.close()
+        return {"databases":{"javDbs.db":{"loaded":ok,"tables":dbs,"integrity_check":integ}}},ok
+    except Exception as e:
+        return {"databases":{"javDbs.db":{"loaded":False,"error":str(e)}}},False
+
 def search_automations(q:str="",limit:int=50):
-    """Cari automation yang cocok dengan keyword (nama ATAU kode di config).
-    Cocok seperti find_history_duplicate: buang non-alphanumeric lalu cek substring."""
-    needle="".join(c for c in (q or "").strip() if c.isalnum()).lower()
-    with db() as conn:rows=conn.execute(f"SELECT name,config FROM automations ORDER BY id ASC LIMIT %s",(limit,)).fetchall()
+    """Cari di automation DB (javDbs.db → search_logs): cocok dengan video_id/title/keywords."""
+    needle=(q or "").strip().lower()
+    if not needle:return []
+    like=f"%{needle}%"
     out=[]
-    for r in rows:
-        name=r["name"] or ""
-        cfg=r["config"] or {}
-        code=str(cfg.get("code") or cfg.get("url") or "").strip()
-        hay=name+" "+code
-        norm="".join(c for c in hay if c.isalnum()).lower()
-        if not needle or needle in name.lower() or needle in code.lower() or needle in norm:
-            out.append({"name":name,"code":code})
+    try:
+        con=_autodb();cur=con.cursor()
+        cur.execute("""SELECT video_id,title,actress,direktori,video_url,thumbnail FROM (
+            SELECT video_id,title,actress,direktori,video_url,thumbnail,0 AS prio
+              FROM search_logs WHERE lower(video_id) LIKE ?
+            UNION ALL
+            SELECT video_id,title,actress,direktori,video_url,thumbnail,1 AS prio
+              FROM search_logs
+             WHERE (lower(title) LIKE ? OR lower(coalesce(keywords,'')) LIKE ?)
+               AND lower(video_id) NOT LIKE ?
+            ) t ORDER BY prio ASC, video_id ASC LIMIT ?""",(like,like,like,like,limit))
+        for r in cur.fetchall():
+            vid,title,actress,direktori,url,thumb=r
+            out.append({"name":vid,"code":vid,"id":vid,"title":title,"url":url,"thumb":thumb})
+        con.close()
+    except Exception:
+        out=[]
     return out
 
 def list_automations():
