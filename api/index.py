@@ -211,7 +211,7 @@ def api_db_check():
     tables,tok=db_check()
     autodbs,autook=autodb_status()
     ok=tok and autook
-    return {"ok":ok,"status":"loaded" if ok else "missing","tables":tables,"databases":autodbs,"app":APP_VERSION}
+    return {"ok":ok,"status":"loaded" if ok else "missing","tables":tables,"databases":autodbs.get("databases",{}),"app":APP_VERSION}
 
 @app.get("/api/automation/search")
 def api_automation_search(q:str=""):
