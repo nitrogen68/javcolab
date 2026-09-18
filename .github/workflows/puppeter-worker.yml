@@ -15,31 +15,35 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: puppeter-worker-${{ github.event.client_payload.task_id || inputs.task_id || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   worker:
     name: Run Puppeter / Playwright
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
 
     env:
       TASK_ID: ${{ github.event.client_payload.task_id || inputs.task_id }}
       API_BASE: ${{ secrets.API_BASE }}
       WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      GH_BRANCH: main
-      GDRIVE_FOLDER: ${{ secrets.GDRIVE_FOLDER }}
+      GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+      GH_REPO: ${{ secrets.GH_REPO || github.repository }}
+      GH_BRANCH: ${{ vars.GH_BRANCH || 'main' }}
+      GDRIVE_FOLDER: ${{ secrets.GDRIVE_FOLDER || vars.GDRIVE_FOLDER || 'javColab' }}
       CI: "true"
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -53,9 +57,11 @@ jobs:
         run: |
           python -m pip install -r worker/requirements.txt
 
-      - name: Install Playwright Chromium
+      - name: Install Playwright Chromium + system deps
         run: |
           python -m playwright install --with-deps chromium
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg >/dev/null || true
 
       - name: Verify Playwright
         run: |
@@ -77,13 +83,10 @@ jobs:
                       "--disable-gpu"
                   ]
               )
-
               page = browser.new_page()
               page.goto("https://example.com", wait_until="domcontentloaded")
-
               print("Browser:", browser.version)
               print("Title:", page.title())
-
               browser.close()
 
           print("Playwright Chromium OK")
@@ -91,14 +94,14 @@ jobs:
 
       - name: Validate worker configuration
         run: |
-          test -n "$TASK_ID" || (echo "TASK_ID kosong" && exit 1)
-          test -n "$API_BASE" || (echo "API_BASE kosong" && exit 1)
-          test -n "$WORKER_SECRET" || (echo "WORKER_SECRET kosong" && exit 1)
-          test -f worker/main.py
-          test -f worker/requirements.txt
+          test -n "$TASK_ID" || (echo "TASK_ID kosong — pastikan client_payload.task_id terisi saat repository_dispatch" && exit 1)
+          test -n "$API_BASE" || (echo "API_BASE kosong (secret)" && exit 1)
+          test -n "$WORKER_SECRET" || (echo "WORKER_SECRET kosong (secret)" && exit 1)
+          test -f worker/main.py || (echo "worker/main.py tidak ada" && exit 1)
           echo "TASK_ID=$TASK_ID"
           echo "API_BASE=$API_BASE"
-          echo "Worker files:"
+          echo "GH_REPO=$GH_REPO"
+          echo "GH_BRANCH=$GH_BRANCH"
           ls -lah worker/
 
       - name: Run Puppeter / Playwright
@@ -107,7 +110,7 @@ jobs:
 
       - name: Upload worker diagnostics
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: puppeter-worker-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
