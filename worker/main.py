@@ -483,7 +483,7 @@ def run():
     log(f"🔍 Menerima input: '{raw_input}'")
     if not session_token:
         report({"status": "Gagal: harus login Google Drive"}, force=True)
-        return
+        raise RuntimeError("Task tidak memiliki session_token Google Drive")
 
     token = get_token(session_token)
     if not token:
