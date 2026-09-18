@@ -24,12 +24,6 @@ def get_full_ui(app_version, modals_html):
             .chk-custom { accent-color: #ef4444; }
             .scrollbar-thin::-webkit-scrollbar { height: 4px; }
             .scrollbar-thin::-webkit-scrollbar-thumb { background: #4B5563; border-radius: 4px; }
-            .suggest-chip {
-                background: #1E293B; border: 1px solid #334155; border-radius: 8px;
-                padding: 6px 14px; white-space: nowrap; cursor: pointer;
-                color: #E2E8F0; font-size: 0.8rem; transition: background 0.2s;
-            }
-            .suggest-chip:hover { background: #2563EB; border-color: #2563EB; }
             #driveIconSvg:hover { color: #4285F4; }
 
             .progress-bar.uploading {
@@ -67,9 +61,6 @@ def get_full_ui(app_version, modals_html):
                             <div class="flex gap-2 w-full relative">
                                 <input type="text" id="urlInput" required placeholder="Contoh: vema 263" autocomplete="off" class="flex-1 min-w-0 h-12 px-4 rounded-xl outline-none text-sm border focus:border-blue-500 transition-all bg-[#0A0F1C]">
                                 <button type="button" data-paste="urlInput" class="shrink-0 px-4 sm:px-5 h-12 bg-[#334155] hover:bg-[#475569] border border-[#334155] rounded-xl text-sm font-semibold text-[#E2E8F0]">Paste</button>
-                            </div>
-                            <div id="randomSuggestContainer" class="mt-2 hidden">
-                                <div id="randomSuggestScroll" class="flex gap-2 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-800"></div>
                             </div>
                             <div id="autoSuggestContainer" class="mt-2 hidden">
                                 <p class="text-[10px] font-bold text-[#14B8A6] uppercase tracking-widest mb-1.5 flex items-center gap-1.5"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 1.1.9 2 2 2h12a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H6a2 2 0 00-2 2z"/></svg> Dari database Automation</p>
@@ -286,32 +277,6 @@ def get_full_ui(app_version, modals_html):
             }
 
             const urlInput = document.getElementById('urlInput');
-            const randomContainer = document.getElementById('randomSuggestContainer');
-            const randomScroll = document.getElementById('randomSuggestScroll');
-            
-            async function loadRandomSuggest() {
-                try {
-                    const res = await fetch('/api/saran_random');
-                    if (!res.ok) throw new Error(`HTTP Error ${res.status}: ${await res.text()}`);
-                    const data = await res.json();
-                    if (data.length > 0) {
-                        randomScroll.innerHTML = data.map(k => `<span class="suggest-chip" data-kode="${escapeHtml(k)}">${escapeHtml(k)}</span>`).join('');
-                        randomContainer.classList.remove('hidden');
-                    } else { randomContainer.classList.add('hidden'); }
-                } catch (e) { 
-                    console.error('[API Error] Gagal memuat saran acak:', e); 
-                    randomContainer.classList.add('hidden');
-                }
-            }
-
-            urlInput.addEventListener('mouseenter', loadRandomSuggest);
-            urlInput.addEventListener('focus', loadRandomSuggest);
-            randomContainer.addEventListener('mouseleave', () => randomContainer.classList.add('hidden'));
-            urlInput.addEventListener('mouseleave', (e) => { if (!randomContainer.contains(e.relatedTarget)) randomContainer.classList.add('hidden'); });
-            randomScroll.addEventListener('click', (e) => {
-                const chip = e.target.closest('.suggest-chip');
-                if (chip) { urlInput.value = chip.dataset.kode; randomContainer.classList.add('hidden'); urlInput.focus(); }
-            });
 
             // ===== AUTOMATION DATABASE AUTOCOMPLETE =====
             const autoContainer = document.getElementById('autoSuggestContainer');
@@ -344,7 +309,7 @@ def get_full_ui(app_version, modals_html):
             });
             autoList.addEventListener('click', (e) => {
                 const btn = e.target.closest('[data-auto-code]');
-                if (btn) { urlInput.value = btn.dataset.autoCode; autoContainer.classList.add('hidden'); randomContainer.classList.add('hidden'); urlInput.focus(); }
+                if (btn) { urlInput.value = btn.dataset.autoCode; autoContainer.classList.add('hidden'); urlInput.focus(); }
             });
 
             // ===== FLOW PREVIEW → KONFIRMASI → DOWNLOAD =====

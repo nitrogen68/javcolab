@@ -161,22 +161,17 @@ def autodb_status():
         return {"databases":{"javDbs.db":{"loaded":False,"error":str(e)}}},False
 
 def search_automations(q:str="",limit:int=50):
-    """Cari di automation DB (javDbs.db → search_logs): cocok dengan video_id/title/keywords."""
+    """Cari di automation DB (javDbs.db → search_logs): hanya cocokkan video_id, bukan title/keywords."""
     needle=(q or "").strip().lower()
     if not needle:return []
     like=f"%{needle}%"
     out=[]
     try:
         con=_autodb();cur=con.cursor()
-        cur.execute("""SELECT video_id,title,actress,direktori,video_url,thumbnail FROM (
-            SELECT video_id,title,actress,direktori,video_url,thumbnail,0 AS prio
-              FROM search_logs WHERE lower(video_id) LIKE ?
-            UNION ALL
-            SELECT video_id,title,actress,direktori,video_url,thumbnail,1 AS prio
-              FROM search_logs
-             WHERE (lower(title) LIKE ? OR lower(coalesce(keywords,'')) LIKE ?)
-               AND lower(video_id) NOT LIKE ?
-            ) t ORDER BY prio ASC, video_id ASC LIMIT ?""",(like,like,like,like,limit))
+        cur.execute("""SELECT video_id,title,actress,direktori,video_url,thumbnail
+                       FROM search_logs
+                       WHERE lower(video_id) LIKE ?
+                       ORDER BY video_id ASC LIMIT ?""",(like,limit))
         for r in cur.fetchall():
             vid,title,actress,direktori,url,thumb=r
             out.append({"name":vid,"code":vid,"id":vid,"title":title,"url":url,"thumb":thumb})

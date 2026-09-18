@@ -221,15 +221,6 @@ def api_automation_search(q:str=""):
     q=(q or "").strip()
     return {"ok":True,"query":q,"results":search_automations(q)}
 
-@app.get("/api/saran_random")
-def get_saran_random():
-    try:
-        b64,_=gh_get("data/suggestions.json")
-        if not b64:return []
-        rows=json.loads(base64.b64decode(b64).decode());import random
-        return [r.get("id") for r in random.sample(rows,min(5,len(rows))) if r.get("id")]
-    except Exception:return []
-
 @app.get("/api/auth/status")
 def api_auth_status(session_token:str=""):
     if not session_token:return {"connected":False}
