@@ -108,6 +108,42 @@ def find_history_duplicate(code:str,email:str):
         if norm and needle in norm:return item
     return None
 
+def db_check():
+    """Cek apakah semua tabel utama terload — kembalikan status + jumlah baris per tabel."""
+    checks={
+        "tasks":"SELECT COUNT(*) AS c FROM tasks",
+        "task_logs":"SELECT COUNT(*) AS c FROM task_logs",
+        "histories":"SELECT COUNT(*) AS c FROM histories",
+        "sessions":"SELECT COUNT(*) AS c FROM sessions",
+        "automations":"SELECT COUNT(*) AS c FROM automations",
+    }
+    status,ok={},True
+    for name,sql in checks.items():
+        try:
+            with db() as conn:
+                row=conn.execute(sql).fetchone()
+            status[name]={"loaded":True,"rows":(row["c"] if row else 0)}
+        except Exception as e:
+            status[name]={"loaded":False,"error":str(e)}
+            ok=False
+    return status,ok
+
+def search_automations(q:str="",limit:int=50):
+    """Cari automation yang cocok dengan keyword (nama ATAU kode di config).
+    Cocok seperti find_history_duplicate: buang non-alphanumeric lalu cek substring."""
+    needle="".join(c for c in (q or "").strip() if c.isalnum()).lower()
+    with db() as conn:rows=conn.execute(f"SELECT name,config FROM automations ORDER BY id ASC LIMIT %s",(limit,)).fetchall()
+    out=[]
+    for r in rows:
+        name=r["name"] or ""
+        cfg=r["config"] or {}
+        code=str(cfg.get("code") or cfg.get("url") or "").strip()
+        hay=name+" "+code
+        norm="".join(c for c in hay if c.isalnum()).lower()
+        if not needle or needle in name.lower() or needle in code.lower() or needle in norm:
+            out.append({"name":name,"code":code})
+    return out
+
 def list_automations():
     with db() as conn:rows=conn.execute("SELECT * FROM automations ORDER BY id DESC").fetchall()
     return [{k:_json(v) for k,v in dict(r).items()} for r in rows]

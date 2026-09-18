@@ -71,6 +71,10 @@ def get_full_ui(app_version, modals_html):
                             <div id="randomSuggestContainer" class="mt-2 hidden">
                                 <div id="randomSuggestScroll" class="flex gap-2 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-800"></div>
                             </div>
+                            <div id="autoSuggestContainer" class="mt-2 hidden">
+                                <p class="text-[10px] font-bold text-[#14B8A6] uppercase tracking-widest mb-1.5 flex items-center gap-1.5"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 1.1.9 2 2 2h12a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H6a2 2 0 00-2 2z"/></svg> Dari database Automation</p>
+                                <div id="autoSuggestList" class="flex flex-col gap-1.5 max-h-56 overflow-y-auto pr-1"></div>
+                            </div>
                         </div>
                         <div id="errorMsg" class="hidden text-xs text-red-400 bg-red-950/40 p-3 rounded-lg border border-red-900">❌ Error: Masukan kode pencarian, bukan URL!</div>
                         <button type="submit" id="submitBtn" class="w-full h-12 mt-2 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white font-bold rounded-xl shadow-lg shadow-blue-900/30">Mulai Pencarian & Unduh</button>
@@ -309,6 +313,38 @@ def get_full_ui(app_version, modals_html):
                 if (chip) { urlInput.value = chip.dataset.kode; randomContainer.classList.add('hidden'); urlInput.focus(); }
             });
 
+            // ===== AUTOMATION DATABASE AUTOCOMPLETE =====
+            const autoContainer = document.getElementById('autoSuggestContainer');
+            const autoList = document.getElementById('autoSuggestList');
+            let autoTimer = null;
+            urlInput.addEventListener('input', () => {
+                const q = urlInput.value.trim();
+                clearTimeout(autoTimer);
+                if (q.length < 2) { autoContainer.classList.add('hidden'); autoList.innerHTML = ''; return; }
+                autoTimer = setTimeout(async () => {
+                    try {
+                        const res = await fetch('/api/automation/search?q=' + encodeURIComponent(q));
+                        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                        const data = await res.json();
+                        const results = data.results || [];
+                        if (results.length > 0) {
+                            autoList.innerHTML = results.map(r => {
+                                const code = (r.code || r.name || '').trim();
+                                const label = (r.code && r.name && r.name !== r.code) ? `${r.name} — ${r.code}` : (r.code || r.name);
+                                const safeCode = escapeHtml(code);
+                                const safeLabel = escapeHtml(label);
+                                return `<button type="button" data-auto-code="${safeCode}" class="text-left w-full px-3 py-2.5 rounded-lg bg-[#0F172A] border border-[#334155] hover:border-[#14B8A6] hover:bg-[#1a2742] text-sm text-[#E2E8F0] transition flex items-center gap-2"><svg class="w-4 h-4 text-[#14B8A6] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg><span>${safeLabel}</span></button>`;
+                            }).join('');
+                            autoContainer.classList.remove('hidden');
+                        } else { autoContainer.classList.add('hidden'); autoList.innerHTML = ''; }
+                    } catch (e) { console.error('[API Error] Gagal memuat saran automation:', e); autoContainer.classList.add('hidden'); }
+                }, 350);
+            });
+            autoList.addEventListener('click', (e) => {
+                const btn = e.target.closest('[data-auto-code]');
+                if (btn) { urlInput.value = btn.dataset.autoCode; autoContainer.classList.add('hidden'); randomContainer.classList.add('hidden'); urlInput.focus(); }
+            });
+
             // ===== FLOW PREVIEW → KONFIRMASI → DOWNLOAD =====
             function showPreview(d) {
                 const preview = d.preview || {};
@@ -431,6 +467,7 @@ def get_full_ui(app_version, modals_html):
                 }
 
                 randomContainer.classList.add('hidden');
+                autoContainer.classList.add('hidden');
                 localStorage.removeItem(PTASK_KEY);
                 const btn = document.getElementById('submitBtn');
                 const errorMsg = document.getElementById('errorMsg');
@@ -439,6 +476,8 @@ def get_full_ui(app_version, modals_html):
                 else { errorMsg.classList.add('hidden'); }
                 urlInput.value = '';
                 
+                const btnC = document.getElementById('confirmDownloadBtn');
+                btnC.disabled = false; btnC.innerText = '⬇️ Unduh ke Google Drive'; btnC.classList.remove('opacity-50', 'cursor-not-allowed');
                 document.getElementById('previewPanel').classList.add('hidden');
                 const progressPanel = document.getElementById('progressPanel');
                 progressPanel.className = "mt-6 bg-[#1E293B] border border-[#334155] rounded-xl overflow-hidden shadow-xl";
@@ -500,7 +539,7 @@ def get_full_ui(app_version, modals_html):
                         body: JSON.stringify({ task_id: currentTaskId, session_token: sessionToken })
                     });
                     if (!res.ok) throw new Error(`Status ${res.status}: ${await res.text()}`);
-                    btnC.disabled = false; btnC.innerText = '⬇️ Unduh ke Google Drive';
+                    btnC.disabled = true; btnC.innerText = '🔒 Unduhan diproses — tombol dinonaktifkan'; btnC.classList.add('opacity-50', 'cursor-not-allowed');
                     startPolling(currentTaskId);
                 } catch (err) {
                     console.error('[API Error] Gagal konfirmasi unduhan:', err);
