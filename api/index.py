@@ -27,7 +27,7 @@ from ui.html import get_full_ui
 from ui.modal import get_modals_html
 
 app=FastAPI(title="Remote Uploader",docs_url=None,redoc_url=None)
-APP_VERSION="1.1.1 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
+APP_VERSION="1.1.2 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
 GH_TOKEN=os.environ.get("GH_TOKEN","");GH_REPO=os.environ.get("GH_REPO","");GH_BRANCH=os.environ.get("GH_BRANCH","main")
 API_BASE=os.environ.get("API_BASE","").rstrip("/");WORKER_SECRET=os.environ.get("WORKER_SECRET","");GDRIVE_FOLDER=os.environ.get("GDRIVE_FOLDER","javColab")
 GOOGLE_CLIENT_ID=os.environ.get("GOOGLE_CLIENT_ID","");GOOGLE_CLIENT_SECRET=os.environ.get("GOOGLE_CLIENT_SECRET","")
@@ -44,7 +44,7 @@ def startup():
     if os.environ.get("DATABASE_URL"):init_db()
 
 def _gh_headers(extra=None,auth=True):
-    h={"Accept":"application/vnd.github+json"}
+    h={"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}
     if auth and GH_TOKEN:h["Authorization"]=f"Bearer {GH_TOKEN}"
     if extra:h.update(extra)
     return h
@@ -69,8 +69,16 @@ def gh_delete(path):
     return r.status_code in (200,204)
 
 def dispatch_repo(event_type,payload):
-    r=requests.post(f"https://api.github.com/repos/{GH_REPO}/dispatches",headers=_gh_headers(),json={"event_type":event_type,"client_payload":payload},timeout=20)
-    if r.status_code not in (200,201,204):raise RuntimeError(f"dispatch: {r.status_code} {r.text[:250]}")
+    if not GH_TOKEN:
+        raise RuntimeError("GH_TOKEN kosong di environment Vercel — tidak bisa memicu GitHub Actions")
+    if not GH_REPO:
+        raise RuntimeError("GH_REPO kosong di environment Vercel — set contoh: nitrogen68/puppeter-web")
+    url=f"https://api.github.com/repos/{GH_REPO}/dispatches"
+    body={"event_type":event_type,"client_payload":payload or {}}
+    r=requests.post(url,headers=_gh_headers(),json=body,timeout=20)
+    # 204 No Content = sukses untuk repository_dispatch
+    if r.status_code not in (200,201,204):
+        raise RuntimeError(f"dispatch {event_type} gagal: HTTP {r.status_code} | repo={GH_REPO} | {r.text[:300]}")
 
 def require_worker(req:Request):
     sec=(req.headers.get("x-worker-secret") or "").strip()
@@ -113,7 +121,16 @@ def pending_del(code):gh_delete(f"{PENDING_DIR}/{code}.json")
 
 @app.get("/api/health")
 def health():
-    _db_ready();return {"ok":True,"app":APP_VERSION,"database":"postgresql","worker":"github-actions","playwright":"chromium"}
+    _db_ready()
+    return {
+        "ok":True,
+        "app":APP_VERSION,
+        "database":"postgresql",
+        "worker":"github-actions",
+        "playwright":"chromium",
+        "gh_repo":bool(GH_REPO),
+        "gh_token":bool(GH_TOKEN),
+    }
 
 @app.get("/api/saran_random")
 def get_saran_random():
@@ -191,7 +208,10 @@ def process_download(req:DownloadRequest):
     existing=get_task(raw)
     if existing and existing.get("status") in ("Memproses","Mengunduh","Mengunggah","Scheduling","queued"):return {"status":"started","task_id":raw}
     create_task(raw,raw,req.session_token,{"clean_title":"","status_text":"Menunggu worker GitHub Actions...","created":wib_time()});add_log(raw,"⏳ Menjadwalkan ke GitHub Actions...")
-    try:dispatch_repo("jav-task",{"task_id":raw})
+    try:
+        dispatch_repo("jav-task",{"task_id":raw})
+        add_log(raw,"✅ Dispatch repository_dispatch(jav-task) berhasil — cek tab Actions")
+        update_task(raw,status="queued",message="Menunggu runner GitHub Actions...")
     except Exception as e:
         update_task(raw,status="Gagal: scheduling",message=f"Gagal dispatch GitHub Actions: {e}",error=str(e));add_log(raw,f"❌ {e}","error");raise HTTPException(status_code=500,detail=f"Gagal dispatch: {e}")
     return {"status":"started","task_id":raw}
