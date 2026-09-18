@@ -46,23 +46,31 @@ def report(task_fields=None, history_item=None, force=False):
         return
     body = {"task_id": task_id, "task": {}}
     if _report_queue:
-        body["task"]["logs"] = _report_queue
+        body["task"]["logs"] = _report_queue[:100]
         _report_queue.clear()
     if task_fields:
         body["task"].update(task_fields)
     if history_item:
         body["history_item"] = history_item
+
     try:
-        requests.post(
+        r = requests.post(
             f"{API_BASE}/api/task/report",
             json=body,
             headers={"X-Worker-Secret": WORKER_SECRET, "Content-Type": "application/json"},
             timeout=20,
         )
+        if r.status_code != 200:
+            raise RuntimeError(
+                f"API report HTTP {r.status_code}: {r.text[:500]}"
+            )
         _last_report = now
     except Exception as e:
-        print(f"[report] warning: {e}", flush=True)
-        _report_queue = (body["task"].get("logs") or [])[:100]
+        print(f"[report] ERROR: {e}", flush=True)
+        failed_logs = body["task"].get("logs") or []
+        if failed_logs:
+            _report_queue = (failed_logs + _report_queue)[:100]
+        raise
 
 
 def get_task():
