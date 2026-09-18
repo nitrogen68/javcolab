@@ -40,7 +40,7 @@ def log(msg):
 
 
 def report(task_fields=None, history_item=None, force=False):
-    global _last_report
+    global _last_report, _report_queue
     now = time.time()
     if not force and now - _last_report < 2.0 and not _report_queue:
         return
