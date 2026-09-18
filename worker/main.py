@@ -58,6 +58,21 @@ def log(msg):
     _report_queue.append(str(msg))
 
 
+def github_context():
+    """Konteks run GitHub Actions agar terlihat real-time di terminal log UI."""
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    if not run_id:
+        return {}
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    return {
+        "run_id": run_id,
+        "run_number": os.environ.get("GITHUB_RUN_NUMBER", ""),
+        "job": os.environ.get("GITHUB_JOB", ""),
+        "step": os.environ.get("GITHUB_ACTION", ""),
+        "html_url": f"https://github.com/{repo}/actions/runs/{run_id}" if repo else "",
+    }
+
+
 def report(task_fields=None, history_item=None, force=False):
     global _last_report
     now = time.time()
@@ -69,6 +84,9 @@ def report(task_fields=None, history_item=None, force=False):
         _report_queue.clear()
     if task_fields:
         body["task"].update(task_fields)
+    ctx = github_context()
+    if ctx:
+        body["task"]["github"] = ctx
     if history_item:
         body["history_item"] = history_item
 
@@ -638,6 +656,10 @@ def run():
 
     report({"status": "Memproses pencarian...", "percent": 0},
            {"id": task_id}, force=True)
+
+    _ctx = github_context()
+    if _ctx:
+        log(f"▶️ GitHub Action: run #{_ctx.get('run_number') or _ctx.get('run_id')} — {_ctx.get('html_url')} (job: {_ctx.get('job')})")
 
     log(f"🔍 Menerima input: '{raw_input}'")
     log(f"📁 Google Drive folder: '{GDRIVE_FOLDER}' | Mode: {'PREVIEW' if is_preview else 'DOWNLOAD'}")

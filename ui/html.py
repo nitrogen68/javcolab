@@ -25,6 +25,10 @@ def get_full_ui(app_version, modals_html):
             .scrollbar-thin::-webkit-scrollbar { height: 4px; }
             .scrollbar-thin::-webkit-scrollbar-thumb { background: #4B5563; border-radius: 4px; }
             #driveIconSvg:hover { color: #4285F4; }
+            .gh-line { color: #22D3EE; font-weight: 600; }
+            .gh-line a { text-decoration: underline; }
+            .gh-step { color: #67E8F9; opacity: 0.85; }
+            .gh-status { color: #FBBF24; text-transform: capitalize; }
 
             .progress-bar.uploading {
                 background: linear-gradient(90deg, #f59e0b, #fbbf24);
@@ -331,6 +335,27 @@ def get_full_ui(app_version, modals_html):
                 panel.classList.remove('hidden');
             }
 
+            function renderLogs(d) {
+                const logBox = document.getElementById('logBox');
+                let html = '';
+                const gh = d.github || {};
+                const run = d.run || {};
+                const runNo = gh.run_number || gh.run_id || '';
+                if (gh.html_url || runNo) {
+                    if (gh.html_url) {
+                        html += `<div class="gh-line">> ▶️ GitHub Action: <a href="${escapeHtml(gh.html_url)}" target="_blank" rel="noopener" class="underline text-[#22D3EE]">run #${escapeHtml(String(runNo))}</a>${run.status ? ` · <span class="gh-status">${escapeHtml(run.status)}</span>` : ''}</div>`;
+                    } else {
+                        html += `<div class="gh-line">> ▶️ GitHub Action: run #${escapeHtml(String(runNo))}${run.status ? ` · ${escapeHtml(run.status)}` : ''}</div>`;
+                    }
+                    (run.steps || []).forEach(s => {
+                        const mark = s.status === 'completed' ? (s.conclusion === 'success' ? '✅' : '❌') : (s.status === 'in_progress' ? '🔄' : '⏳');
+                        html += `<div class="gh-step">>   ${mark} ${escapeHtml(s.name || '')}${s.status === 'in_progress' ? ' — sedang berjalan...' : ''}</div>`;
+                    });
+                }
+                if (d.logs && d.logs.length) html += d.logs.map(l => `<div>> ${escapeHtml(l)}</div>`).join('');
+                if (html) { logBox.innerHTML = html; logBox.scrollTop = logBox.scrollHeight; }
+            }
+
             function startPolling(taskId) {
                 clearInterval(pollTimer);
                 const progressPanel = document.getElementById('progressPanel');
@@ -353,12 +378,8 @@ def get_full_ui(app_version, modals_html):
                         document.getElementById('pPercent').innerText = pct + '%';
                         document.getElementById('pStatus').innerText = d.status || 'Memproses...';
                         document.getElementById('pMeta').innerText = `Size: ${displaySize} • Speed: ${speedStr}`;
-                        
-                        if (d.logs && d.logs.length > 0) {
-                            const logBox = document.getElementById('logBox');
-                            logBox.innerHTML = d.logs.map(l => `<div>> ${escapeHtml(l)}</div>`).join('');
-                            logBox.scrollTop = logBox.scrollHeight;
-                        }
+
+                        renderLogs(d);
 
                         const pBar = document.getElementById('pBar');
                         const statusText = d.status || '';

@@ -54,6 +54,12 @@ def add_log(task_id:str,message:str,level:str="info"):
     with db() as conn:
         conn.execute("INSERT INTO task_logs(task_id,level,message) VALUES(%s,%s,%s)",(task_id,level,message));conn.execute("UPDATE tasks SET updated_at=NOW() WHERE task_id=%s",(task_id,))
 
+def patch_task_meta(task_id:str,patch:dict):
+    """Gabungkan sebagian field ke kolom meta JSONB tanpa menimpa field lain."""
+    if not patch:return
+    with db() as conn:
+        conn.execute("UPDATE tasks SET meta=COALESCE(meta,'{}'::jsonb)::jsonb || %s::jsonb,updated_at=NOW() WHERE task_id=%s",(json.dumps(patch,ensure_ascii=False),task_id))
+
 def get_logs(task_id:str,limit:int=200):
     with db() as conn:rows=conn.execute("SELECT level,message,created_at FROM task_logs WHERE task_id=%s ORDER BY id ASC LIMIT %s",(task_id,limit)).fetchall()
     return [{"level":r["level"],"message":r["message"],"created_at":_json(r["created_at"])} for r in rows]

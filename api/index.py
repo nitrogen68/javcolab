@@ -20,7 +20,7 @@ from googleapiclient.discovery import build
 from pydantic import BaseModel
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from db import (init_db, create_task, update_task, add_log, get_task, upsert_session,
+from db import (init_db, create_task, update_task, patch_task_meta, add_log, get_task, upsert_session,
     get_session_email, upsert_history, list_history, delete_history, clear_history,
     find_history_duplicate, list_automations, upsert_automation, due_automations,
     mark_automation_run, db_check, search_automations, autodb_status)
@@ -28,7 +28,7 @@ from ui.html import get_full_ui
 from ui.modal import get_modals_html
 
 app=FastAPI(title="Remote Uploader",docs_url=None,redoc_url=None)
-APP_VERSION="1.3.0 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
+APP_VERSION="1.4.0 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
 
 GDRIVE_SCOPE="https://www.googleapis.com/auth/drive.file"
 GH_TOKEN=os.environ.get("GH_TOKEN","");GH_REPO=os.environ.get("GH_REPO","");GH_BRANCH=os.environ.get("GH_BRANCH","main")
@@ -126,6 +126,48 @@ def dispatch_repo(event_type,payload):
         + " | ".join(errors)
         + " — pastikan GH_TOKEN punya scope 'repo' + 'workflow', dan workflow file ada di branch main."
     )
+
+def _gh_time(iso:str)->float:
+    try:return datetime.fromisoformat(iso.replace("Z","+00:00")).timestamp()
+    except Exception:return 0.0
+
+def resolve_run_after_dispatch(method:str):
+    """Cari run_id GitHub Actions yang baru dibuat oleh dispatch.
+    workflow_dispatch/repository_dispatch tidak mengembalikan run_id,
+    jadi kita ambil run terbaru dengan event+branch yang sama (< 90 detik)."""
+    if not GH_REPO:return None
+    try:
+        if method=="workflow_dispatch":
+            url=f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{WORKER_WORKFLOW_FILE}/runs"
+        else:
+            url=f"https://api.github.com/repos/{GH_REPO}/actions/runs"
+        r=requests.get(url,headers=_gh_headers(),params={"branch":GH_BRANCH,"event":method,"per_page":5},timeout=15)
+        if r.status_code!=200:return None
+        for run in r.json().get("workflow_runs",[]):
+            if _gh_time(run.get("created_at") or "") and time.time()-_gh_time(run.get("created_at") or "")>90:continue
+            return {"run_id":run.get("id"),"run_number":run.get("run_number"),"html_url":run.get("html_url"),"status":run.get("status")}
+    except Exception:return None
+    return None
+
+_STEP_CACHE={}
+def gh_run_summary(run_id):
+    """Status run + daftar step job worker secara real-time dari GitHub API (cache 8 dtk)."""
+    key=str(run_id);now=time.time();c=_STEP_CACHE.get(key)
+    if c and now-c[0]<8:return c[1]
+    try:
+        r=requests.get(f"https://api.github.com/repos/{GH_REPO}/actions/runs/{run_id}/jobs",headers=_gh_headers(),params={"per_page":20},timeout=12)
+        if r.status_code!=200:_STEP_CACHE[key]=(now,{});return {}
+        jobs=r.json().get("jobs",[])
+        if not jobs:_STEP_CACHE[key]=(now,{});return {}
+        j=jobs[0]
+        summary={
+            "status":j.get("status",""),
+            "conclusion":j.get("conclusion") or "",
+            "name":j.get("name",""),
+            "steps":[{"number":s.get("number"),"name":s.get("name"),"status":s.get("status"),"conclusion":s.get("conclusion")} for s in j.get("steps",[])],
+        }
+        _STEP_CACHE[key]=(now,summary);return summary
+    except Exception:return {}
 
 def require_worker(req:Request):
     sec=(req.headers.get("x-worker-secret") or "").strip()
@@ -296,6 +338,10 @@ def process_download(req:DownloadRequest):
     try:
         info=dispatch_repo("jav-task",{"task_id":raw})
         add_log(raw,f"✅ Dispatch berhasil via {info.get('method')} HTTP {info.get('status')} — cek tab Actions (Puppeter Worker)")
+        run=resolve_run_after_dispatch(info.get("method") or "") or None
+        if run:
+            patch_task_meta(raw,{"github":run})
+            add_log(raw,f"▶️ GitHub Action: run #{run.get('run_number') or run.get('run_id')} — {run.get('html_url')}")
         update_task(raw,status="queued",message=f"Menunggu runner ({info.get('method')})...")
     except Exception as e:
         update_task(raw,status="Gagal: scheduling",message=f"Gagal dispatch GitHub Actions: {e}",error=str(e));add_log(raw,f"❌ {e}","error");raise HTTPException(status_code=500,detail=f"Gagal dispatch: {e}")
@@ -353,6 +399,11 @@ def get_progress(task_id:str):
     out["preview"]=meta.get("preview") or None
     out["confirmed"]=bool(meta.get("confirmed"))
     out["mode"]=str(meta.get("mode") or ("download" if out["confirmed"] else "preview"))
+    github=dict(meta.get("github") or {})
+    out["github"]=github
+    if github.get("run_id"):
+        try:out["run"]=gh_run_summary(github["run_id"])
+        except Exception:out["run"]={}
     if t.get("result") is not None:out["result"]=t["result"]
     if t.get("error"):out["error"]=t["error"]
     return out
@@ -403,8 +454,15 @@ def automation_run(request:Request):
         cfg=a.get("config") or {};code=str(cfg.get("code") or cfg.get("url") or "").strip()
         if not code:mark_automation_run(a["id"]);results.append({"id":a["id"],"status":"skipped","reason":"config.code kosong"});continue
         tid=f"auto-{a['id']}-{int(time.time())}";create_task(tid,code,str(cfg.get("session_token") or ""),{"automation_id":a["id"],"created":wib_time()});add_log(tid,f"🤖 Automation '{a['name']}' dijalankan")
-        try:dispatch_repo("jav-task",{"task_id":tid});mark_automation_run(a["id"]);results.append({"id":a["id"],"task_id":tid,"status":"dispatched"})
-        except Exception as e:update_task(tid,status="Gagal: scheduling",error=str(e),message=str(e));results.append({"id":a["id"],"status":"error","error":str(e)})
+        try:dispatch_repo("jav-task",{"task_id":tid});mark_automation_run(a["id"])
+        except Exception as e:update_task(tid,status="Gagal: scheduling",error=str(e),message=str(e));results.append({"id":a["id"],"status":"error","error":str(e)});continue
+        if GH_REPO:
+            try:
+                run=resolve_run_after_dispatch("workflow_dispatch")
+                if run:
+                    patch_task_meta(tid,{"github":run});add_log(tid,f"▶️ GitHub Action: run #{run.get('run_number') or run.get('run_id')} — {run.get('html_url')}")
+            except Exception:pass
+        results.append({"id":a["id"],"task_id":tid,"status":"dispatched"})
     return {"ok":True,"results":results}
 
 @app.get("/api",response_class=HTMLResponse,include_in_schema=False)
