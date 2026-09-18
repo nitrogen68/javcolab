@@ -433,7 +433,6 @@ def get_full_ui(app_version, modals_html):
                     return; 
                 }
 
-                randomContainer.classList.add('hidden');
                 autoContainer.classList.add('hidden');
                 localStorage.removeItem(PTASK_KEY);
                 const btn = document.getElementById('submitBtn');
