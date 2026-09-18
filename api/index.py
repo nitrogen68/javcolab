@@ -28,15 +28,23 @@ from ui.html import get_full_ui
 from ui.modal import get_modals_html
 
 app=FastAPI(title="Remote Uploader",docs_url=None,redoc_url=None)
-APP_VERSION="1.1.4 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
+APP_VERSION="1.2.0 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
 GH_TOKEN=os.environ.get("GH_TOKEN","");GH_REPO=os.environ.get("GH_REPO","");GH_BRANCH=os.environ.get("GH_BRANCH","main")
-API_BASE=os.environ.get("API_BASE","").rstrip("/");WORKER_SECRET=os.environ.get("WORKER_SECRET","");GDRIVE_FOLDER=os.environ.get("GDRIVE_FOLDER","javColab")
+API_BASE=os.environ.get("API_BASE","").rstrip("/");WORKER_SECRET=os.environ.get("WORKER_SECRET","")
 GOOGLE_CLIENT_ID=os.environ.get("GOOGLE_CLIENT_ID","");GOOGLE_CLIENT_SECRET=os.environ.get("GOOGLE_CLIENT_SECRET","")
 _ENC=os.environ.get("API_ENC_KEY","").encode() or hashlib.sha256(((WORKER_SECRET or "puppeter")+"::enc").encode()).digest()
 FERNET=Fernet(base64.urlsafe_b64encode(_ENC[:32]))
 
 # Nama file workflow worker (harus cocok dengan path di repo)
 WORKER_WORKFLOW_FILE="puppeter-worker.yml"
+
+def _normalize_gdrive_folder(raw=None):
+    """Normalisasi GDRIVE_FOLDER: hanya nama folder di root Drive (tanpa path/prefix)."""
+    name=os.path.basename((raw or "").strip().strip("/"))
+    if not name or name in (".",".."):return "javColab"
+    return name
+
+GDRIVE_FOLDER=_normalize_gdrive_folder(os.environ.get("GDRIVE_FOLDER","javColab"))
 
 
 def _db_ready():
@@ -189,6 +197,7 @@ def health():
         "gh_token":bool(GH_TOKEN),
         "worker_secret":bool(WORKER_SECRET),
         "workflow":WORKER_WORKFLOW_FILE,
+        "gdrive_folder":GDRIVE_FOLDER,
     }
 
 @app.get("/api/saran_random")
@@ -268,8 +277,9 @@ def process_download(req:DownloadRequest):
     if existing and existing.get("status") in active_statuses:
         return {"status":"started","task_id":raw,"skipped":"already_running","current_status":existing.get("status")}
     # Selalu buat/update task + dispatch ulang (queued/gagal/selesai lama → coba lagi)
-    create_task(raw,raw,req.session_token,{"clean_title":"","status_text":"Menunggu worker GitHub Actions...","created":wib_time()})
-    add_log(raw,"⏳ Menjadwalkan ke GitHub Actions...")
+    # Mode awal: PREVIEW (cari + metadata) dulu, unduh penuh HANYA setelah user konfirmasi.
+    create_task(raw,raw,req.session_token,{"clean_title":"","status_text":"Menunggu worker GitHub Actions...","created":wib_time(),"mode":"preview","confirmed":False})
+    add_log(raw,"⏳ Menjadwalkan ke GitHub Actions (mode PREVIEW)...")
     update_task(raw,status="Scheduling",message="Memicu GitHub Actions...",session_token=req.session_token)
     try:
         info=dispatch_repo("jav-task",{"task_id":raw})
@@ -278,6 +288,32 @@ def process_download(req:DownloadRequest):
     except Exception as e:
         update_task(raw,status="Gagal: scheduling",message=f"Gagal dispatch GitHub Actions: {e}",error=str(e));add_log(raw,f"❌ {e}","error");raise HTTPException(status_code=500,detail=f"Gagal dispatch: {e}")
     return {"status":"started","task_id":raw,"dispatch":info}
+
+class ConfirmRequest(BaseModel):
+    task_id:str;session_token:str=""
+
+@app.post("/api/download/confirm")
+def confirm_download(req:ConfirmRequest):
+    """Konfirmasi preview → ubah task ke mode=download (confirmed=True) lalu re-dispatch worker."""
+    tid=req.task_id.strip()
+    if not tid:raise HTTPException(status_code=400,detail="task_id wajib")
+    if not req.session_token:raise HTTPException(status_code=401,detail="Harus login Google Drive dulu")
+    _db_ready();current=get_task(tid)
+    if not current:raise HTTPException(status_code=404,detail=f"Task {tid} tidak ditemukan")
+    # Hanya skip re-dispatch jika status benar-benar aktif (worker jalan), BUKAN queued stuck.
+    active_statuses=("Memproses","Mengunduh","Mengunggah","Memproses pencarian...","Scheduling")
+    if current.get("status") in active_statuses:
+        return {"status":"started","task_id":tid,"skipped":"already_running","current_status":current.get("status")}
+    meta=dict(current.get("meta") or {});meta["confirmed"]=True;meta["mode"]="download"
+    update_task(tid,meta=meta,session_token=req.session_token,status="queued",message="Menunggu runner (download)...",progress=0)
+    add_log(tid,"✅ Konfirmasi diterima — melanjutkan ke unduh penuh + upload ke Google Drive.")
+    try:
+        info=dispatch_repo("jav-task",{"task_id":tid})
+        add_log(tid,f"✅ Dispatch download via {info.get('method')} HTTP {info.get('status')} — cek tab Actions (Puppeter Worker)")
+        update_task(tid,status="queued",message=f"Menunggu runner ({info.get('method')})...")
+    except Exception as e:
+        update_task(tid,status="Gagal: scheduling",message=f"Gagal dispatch GitHub Actions: {e}",error=str(e));add_log(tid,f"❌ {e}","error");raise HTTPException(status_code=500,detail=f"Gagal dispatch: {e}")
+    return {"status":"started","task_id":tid,"dispatch":info}
 
 class ReportBody(BaseModel):
     task_id:str;task:dict={};history_item:dict|None=None
@@ -309,6 +345,9 @@ def get_progress(task_id:str):
     if not t:return {}
     meta=t.pop("meta",{}) or {};code=t.get("code") or task_id
     out={"id":code,"task_id":t.get("task_id"),"status":t.get("status"),"percent":t.get("progress",0),"speed":t.get("speed_kbps",0),"downloaded":meta.get("downloaded",0),"total":meta.get("total",t.get("size_bytes",0)),"clean_title":meta.get("clean_title",""),"status_text":t.get("message",meta.get("status_text","")),"logs":[x.get("message") for x in t.get("logs",[])],"created":meta.get("created",t.get("created_at")),"updated":t.get("updated_at"),"session_token":t.get("session_token","")}
+    out["preview"]=meta.get("preview") or None
+    out["confirmed"]=bool(meta.get("confirmed"))
+    out["mode"]=str(meta.get("mode") or ("download" if out["confirmed"] else "preview"))
     if t.get("result") is not None:out["result"]=t["result"]
     if t.get("error"):out["error"]=t["error"]
     return out
@@ -347,6 +386,11 @@ class AutomationBody(BaseModel):
 @app.get("/api/automation")
 def automation_list(request:Request):
     require_worker(request);_db_ready();return list_automations()
+
+@app.get("/api/automations")
+def automations_public():
+    """List automations dari PostgreSQL (publik, tanpa worker secret)."""
+    _db_ready();items=list_automations();return {"ok":True,"items":items,"count":len(items)}
 
 @app.post("/api/automation")
 def automation_save(body:AutomationBody,request:Request):

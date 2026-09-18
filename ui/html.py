@@ -57,6 +57,7 @@ def get_full_ui(app_version, modals_html):
             <div class="flex gap-6 border-b border-[#334155] mb-6">
                 <button data-tab="upload" class="tab-btn active pb-3 font-semibold text-sm tracking-wide">Upload Baru</button>
                 <button data-tab="history" class="tab-btn pb-3 font-semibold text-sm tracking-wide">Riwayat Unduhan</button>
+                <button data-tab="automation" class="tab-btn pb-3 font-semibold text-sm tracking-wide">Automation</button>
             </div>
             
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -103,6 +104,24 @@ def get_full_ui(app_version, modals_html):
                             </div>
                         </div>
                     </div>
+                    <div id="previewPanel" class="card p-4 sm:p-5 mt-4 hidden">
+                        <div class="flex items-start gap-4 flex-col sm:flex-row">
+                            <div id="previewThumbWrap" class="w-full sm:w-48 h-32 sm:h-32 rounded-xl bg-[#0A0F1C] border border-[#334155] overflow-hidden shrink-0">
+                                <img id="previewThumb" class="w-full h-full object-cover hidden" alt="Thumbnail">
+                                <div id="previewThumbPlaceholder" class="w-full h-full flex items-center justify-center text-3xl">🎬</div>
+                            </div>
+                            <div class="flex-1 min-w-0 w-full">
+                                <p class="text-[10px] font-bold text-[#14B8A6] uppercase tracking-widest mb-1">Preview siap — konfirmasi untuk unduh penuh</p>
+                                <h3 id="previewTitle" class="text-sm sm:text-base font-bold text-white mb-2 leading-snug">-</h3>
+                                <div class="flex flex-wrap gap-2 text-[11px]">
+                                    <span id="previewSize" class="px-2 py-1 bg-[#0F172A] text-[#94A3B8] rounded-lg border border-[#334155] font-mono">Ukuran: -</span>
+                                    <span id="previewDur" class="px-2 py-1 bg-[#0F172A] text-[#94A3B8] rounded-lg border border-[#334155] font-mono">Durasi: -</span>
+                                    <span id="previewFname" class="px-2 py-1 bg-[#0F172A] text-[#94A3B8] rounded-lg border border-[#334155] font-mono truncate max-w-full">File: -</span>
+                                </div>
+                                <button id="confirmDownloadBtn" class="mt-4 w-full sm:w-auto px-6 h-12 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 text-white font-bold rounded-xl shadow-lg shadow-emerald-900/30">⬇️ Unduh ke Google Drive</button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 
                 <div id="historyPanel" class="card p-5 sm:p-6 hidden flex flex-col h-full max-h-[800px]">
@@ -119,6 +138,19 @@ def get_full_ui(app_version, modals_html):
                 </div>
             </div>
             
+            <div id="automationPanel" class="card p-4 sm:p-6 mt-6 hidden">
+                <div class="flex justify-between items-center mb-5">
+                    <h2 class="font-bold text-white text-lg tracking-tight">🤖 Automation</h2>
+                    <button onclick="loadAutomations()" class="text-xs font-semibold bg-[#334155] hover:bg-[#475569] text-white px-4 py-2 rounded-lg border border-[#475569] transition">🔄 Refresh</button>
+                </div>
+                <div id="automationList" class="space-y-3">
+                    <div class="flex flex-col items-center justify-center h-40 text-center">
+                        <span class="text-4xl mb-2 opacity-50">🤖</span>
+                        <p class="text-[#64748B] text-sm">Memuat automation...</p>
+                    </div>
+                </div>
+            </div>
+
             <div id="driveStatusContainer" class="mt-6 flex flex-col md:flex-row items-center justify-center bg-[#1E293B] border border-[#334155] rounded-xl p-5 gap-4 md:gap-8 relative overflow-visible">
                 <div class="flex flex-col items-center justify-center min-w-0 text-center">
                     <svg id="driveIconSvg" class="w-10 h-10 text-gray-400 cursor-pointer transition hover:scale-110 mb-2 drop-shadow-md" fill="currentColor" viewBox="0 0 24 24" onclick="toggleDriveStatus()">
@@ -211,6 +243,7 @@ def get_full_ui(app_version, modals_html):
             let pollTimer = null;
             let fileToDelete = null;
             let isDownloading = false;
+            let currentTaskId = '';
 
             const driveIconSvg = document.getElementById('driveIconSvg');
             const driveEmail = document.getElementById('driveEmail');
@@ -245,6 +278,7 @@ def get_full_ui(app_version, modals_html):
                 document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
                 document.getElementById('uploadPanel').classList.toggle('hidden', t !== 'upload');
                 document.getElementById('historyPanel').classList.toggle('hidden', t !== 'history');
+                document.getElementById('automationPanel').classList.toggle('hidden', t !== 'automation');
                 
                 const driveContainer = document.getElementById('driveStatusContainer');
                 if (driveContainer) {
@@ -252,6 +286,7 @@ def get_full_ui(app_version, modals_html):
                 }
 
                 if (t === 'history') loadHistory();
+                if (t === 'automation') loadAutomations();
             }
 
             function formatBytes(b) {
@@ -289,65 +324,31 @@ def get_full_ui(app_version, modals_html):
                 if (chip) { urlInput.value = chip.dataset.kode; randomContainer.classList.add('hidden'); urlInput.focus(); }
             });
 
-            document.getElementById('uploadForm').addEventListener('submit', async (e) => {
-                e.preventDefault();
-                if (!sessionToken) {
-                    const warningText = document.getElementById('loginWarning');
-                    warningText.classList.remove('hidden');
-                    warningText.classList.add('animate-pulse');
-                    setTimeout(() => {
-                        warningText.classList.add('hidden');
-                        warningText.classList.remove('animate-pulse');
-                    }, 4000);
-                    return; 
+            // ===== FLOW PREVIEW → KONFIRMASI → DOWNLOAD =====
+            function showPreview(d) {
+                const preview = d.preview || {};
+                const panel = document.getElementById('previewPanel');
+                document.getElementById('previewTitle').innerText = preview.title || d.clean_title || 'Judul tidak diketahui';
+                document.getElementById('previewSize').innerText = 'Ukuran: ' + (preview.size || '—');
+                document.getElementById('previewDur').innerText = 'Durasi: ' + (preview.duration || '—');
+                document.getElementById('previewFname').innerText = 'File: ' + (preview.filename || '—');
+                const img = document.getElementById('previewThumb');
+                const ph = document.getElementById('previewThumbPlaceholder');
+                img.classList.add('hidden'); ph.classList.remove('hidden');
+                if (preview.thumb) {
+                    img.onload = () => { ph.classList.add('hidden'); img.classList.remove('hidden'); };
+                    img.onerror = () => { img.classList.add('hidden'); ph.classList.remove('hidden'); };
+                    img.src = preview.thumb;
                 }
+                panel.classList.remove('hidden');
+            }
 
-                randomContainer.classList.add('hidden');
-                const btn = document.getElementById('submitBtn');
-                const errorMsg = document.getElementById('errorMsg');
-                const val = urlInput.value.trim();
-                if (val.startsWith('http://') || val.startsWith('https://')) { errorMsg.classList.remove('hidden'); return; }
-                else { errorMsg.classList.add('hidden'); }
-                urlInput.value = '';
-                
-                const progressPanel = document.getElementById('progressPanel');
-                progressPanel.className = "mt-6 bg-[#1E293B] border border-[#334155] rounded-xl overflow-hidden shadow-xl";
-                document.getElementById('pBar').className = "progress-bar bg-gradient-to-r from-[#0D9488] to-[#14B8A6] h-full rounded-full relative";
-                document.getElementById('pStatus').className = "font-medium bg-[#0F172A] text-[#94A3B8] px-3 py-1.5 rounded-lg border border-[#334155] inline-block truncate";
-                document.getElementById('pSpinner').classList.remove('hidden');
-                document.getElementById('pBar').style.width = '0%';
-                document.getElementById('pPercent').innerText = '0%';
-                document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> Memulai sistem pencarian...</div>';
-                btn.disabled = true; btn.innerText = 'Sedang Memproses...'; btn.classList.add('opacity-75');
-                progressPanel.classList.remove('hidden');
-                document.getElementById('pFile').innerText = val;
-                document.getElementById('pStatus').innerText = "Menghubungi Server...";
-                isDownloading = true;
-                
-                try {
-                    const dlRes = await fetch('/api/download', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ url: val, filename: '', session_token: sessionToken })
-                    });
-                    
-                    if (!dlRes.ok) throw new Error(`Server membalas dengan status: ${dlRes.status} - ${await dlRes.text()}`);
-                } catch (dlErr) {
-                    console.error('[API Error] Gagal mengirim perintah unduh:', dlErr);
-                    isDownloading = false;
-                    progressPanel.className = "mt-6 bg-[#450a0a] border border-[#991b1b] rounded-xl overflow-hidden shadow-xl shadow-red-900/20";
-                    document.getElementById('pStatus').className = "font-bold bg-[#7f1d1d] text-red-300 px-3 py-1.5 rounded-lg border border-[#991b1b] inline-block truncate";
-                    document.getElementById('pStatus').innerText = "❌ Gagal: " + dlErr.message;
-                    document.getElementById('pBar').className = "progress-bar bg-red-600 h-full rounded-full relative";
-                    document.getElementById('pSpinner').classList.add('hidden');
-                    btn.disabled = false; btn.innerText = 'Coba Lagi'; btn.classList.remove('opacity-75');
-                    return; 
-                }
-
+            function startPolling(taskId) {
                 clearInterval(pollTimer);
+                const progressPanel = document.getElementById('progressPanel');
                 pollTimer = setInterval(async () => {
                     try {
-                        const res = await fetch('/api/progress/' + encodeURIComponent(val));
+                        const res = await fetch('/api/progress/' + encodeURIComponent(taskId));
                         if (!res.ok) throw new Error(`HTTP ${res.status}`);
                         const d = await res.json();
                         
@@ -377,6 +378,22 @@ def get_full_ui(app_version, modals_html):
                         if (statusText.includes('Mengunggah')) { pBar.classList.add('uploading'); } 
                         else { pBar.classList.remove('uploading'); }
 
+                        const btn = document.getElementById('submitBtn');
+
+                        if (d.status === 'preview_ready') {
+                            clearInterval(pollTimer);
+                            isDownloading = false;
+                            document.getElementById('pBar').style.width = '100%';
+                            document.getElementById('pPercent').innerText = '100%';
+                            document.getElementById('pStatus').innerText = '✅ Preview ditemukan — klik "Unduh ke Google Drive" untuk kirim ke GDrive';
+                            document.getElementById('pStatus').className = "font-bold bg-[#052e16] text-emerald-300 px-3 py-1.5 rounded-lg border border-[#166534] inline-block truncate";
+                            document.getElementById('pSpinner').classList.add('hidden');
+                            document.getElementById('pMeta').innerText = 'Preview menunggu konfirmasi';
+                            showPreview(d);
+                            btn.disabled = false; btn.innerText = 'Cari & Tampilkan Preview'; btn.classList.remove('opacity-75');
+                            return;
+                        }
+
                         if (d.status === 'Selesai') {
                             clearInterval(pollTimer);
                             isDownloading = false;
@@ -385,7 +402,8 @@ def get_full_ui(app_version, modals_html):
                             document.getElementById('pStatus').innerText = "✅ Berhasil Disimpan ke GDrive!";
                             document.getElementById('pBar').className = "progress-bar bg-green-500 h-full rounded-full relative";
                             document.getElementById('pSpinner').classList.add('hidden');
-                            btn.disabled = false; btn.innerText = 'Mulai Pencarian & Unduh'; btn.classList.remove('opacity-75');
+                            document.getElementById('previewPanel').classList.add('hidden');
+                            btn.disabled = false; btn.innerText = 'Cari & Tampilkan Preview'; btn.classList.remove('opacity-75');
                             loadHistory();
                             setTimeout(() => {
                                 progressPanel.classList.add('opacity-0');
@@ -404,12 +422,114 @@ def get_full_ui(app_version, modals_html):
                             document.getElementById('pStatus').innerText = "❌ " + d.status;
                             document.getElementById('pBar').className = "progress-bar bg-red-600 h-full rounded-full relative";
                             document.getElementById('pSpinner').classList.add('hidden');
-                            btn.disabled = false; btn.innerText = 'Coba Lagi'; btn.classList.remove('opacity-75');
+                            btn.disabled = false; btn.innerText = 'Cari & Tampilkan Preview'; btn.classList.remove('opacity-75');
                         }
                     } catch (pollErr) {
                         console.error('[API Error] Gagal membaca progress:', pollErr);
                     }
                 }, 1000);
+            }
+
+            document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                if (!sessionToken) {
+                    const warningText = document.getElementById('loginWarning');
+                    warningText.classList.remove('hidden');
+                    warningText.classList.add('animate-pulse');
+                    setTimeout(() => {
+                        warningText.classList.add('hidden');
+                        warningText.classList.remove('animate-pulse');
+                    }, 4000);
+                    return; 
+                }
+
+                randomContainer.classList.add('hidden');
+                const btn = document.getElementById('submitBtn');
+                const errorMsg = document.getElementById('errorMsg');
+                const val = urlInput.value.trim();
+                if (val.startsWith('http://') || val.startsWith('https://')) { errorMsg.classList.remove('hidden'); return; }
+                else { errorMsg.classList.add('hidden'); }
+                urlInput.value = '';
+                
+                document.getElementById('previewPanel').classList.add('hidden');
+                const progressPanel = document.getElementById('progressPanel');
+                progressPanel.className = "mt-6 bg-[#1E293B] border border-[#334155] rounded-xl overflow-hidden shadow-xl";
+                document.getElementById('pBar').className = "progress-bar bg-gradient-to-r from-[#0D9488] to-[#14B8A6] h-full rounded-full relative";
+                document.getElementById('pStatus').className = "font-medium bg-[#0F172A] text-[#94A3B8] px-3 py-1.5 rounded-lg border border-[#334155] inline-block truncate";
+                document.getElementById('pSpinner').classList.remove('hidden');
+                document.getElementById('pBar').style.width = '0%';
+                document.getElementById('pPercent').innerText = '0%';
+                document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> Memulai sistem pencarian...</div>';
+                btn.disabled = true; btn.innerText = 'Mencari & Menyiapkan Preview...'; btn.classList.add('opacity-75');
+                progressPanel.classList.remove('hidden');
+                document.getElementById('pFile').innerText = val;
+                document.getElementById('pStatus').innerText = "Menghubungi Server...";
+                isDownloading = true;
+                
+                try {
+                    const dlRes = await fetch('/api/download', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: val, filename: '', session_token: sessionToken })
+                    });
+                    
+                    if (!dlRes.ok) throw new Error(`Server membalas dengan status: ${dlRes.status} - ${await dlRes.text()}`);
+                    const dlData = await dlRes.json();
+                    currentTaskId = dlData.task_id || val;
+                    startPolling(currentTaskId);
+                } catch (dlErr) {
+                    console.error('[API Error] Gagal mengirim perintah unduh:', dlErr);
+                    isDownloading = false;
+                    progressPanel.className = "mt-6 bg-[#450a0a] border border-[#991b1b] rounded-xl overflow-hidden shadow-xl shadow-red-900/20";
+                    document.getElementById('pStatus').className = "font-bold bg-[#7f1d1d] text-red-300 px-3 py-1.5 rounded-lg border border-[#991b1b] inline-block truncate";
+                    document.getElementById('pStatus').innerText = "❌ Gagal: " + dlErr.message;
+                    document.getElementById('pBar').className = "progress-bar bg-red-600 h-full rounded-full relative";
+                    document.getElementById('pSpinner').classList.add('hidden');
+                    btn.disabled = false; btn.innerText = 'Cari & Tampilkan Preview'; btn.classList.remove('opacity-75');
+                    return; 
+                }
+            });
+
+            // ===== KONFIRMASI DAN UNDUH PENUH KE GDRIVE =====
+            document.getElementById('confirmDownloadBtn').addEventListener('click', async () => {
+                if (!currentTaskId || !sessionToken) return;
+                const btnC = document.getElementById('confirmDownloadBtn');
+                btnC.disabled = true; btnC.innerText = '⏳ Menyiapkan unduhan...';
+                document.getElementById('previewPanel').classList.add('hidden');
+
+                const progressPanel = document.getElementById('progressPanel');
+                progressPanel.className = "mt-6 bg-[#1E293B] border border-[#334155] rounded-xl overflow-hidden shadow-xl";
+                document.getElementById('pBar').className = "progress-bar bg-gradient-to-r from-[#0D9488] to-[#14B8A6] h-full rounded-full relative";
+                document.getElementById('pStatus').className = "font-medium bg-[#0F172A] text-[#94A3B8] px-3 py-1.5 rounded-lg border border-[#334155] inline-block truncate";
+                document.getElementById('pSpinner').classList.remove('hidden');
+                document.getElementById('pBar').style.width = '0%';
+                document.getElementById('pPercent').innerText = '0%';
+                document.getElementById('pStatus').innerText = 'Memicu unduhan penuh ke Google Drive...';
+                document.getElementById('pMeta').innerText = 'Size: 0 B • Speed: 0 KB/s';
+                document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> Konfirmasi diterima — menyiapkan unduhan penuh...</div>';
+                progressPanel.classList.remove('hidden');
+                isDownloading = true;
+
+                try {
+                    const res = await fetch('/api/download/confirm', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ task_id: currentTaskId, session_token: sessionToken })
+                    });
+                    if (!res.ok) throw new Error(`Status ${res.status}: ${await res.text()}`);
+                    btnC.disabled = false; btnC.innerText = '⬇️ Unduh ke Google Drive';
+                    startPolling(currentTaskId);
+                } catch (err) {
+                    console.error('[API Error] Gagal konfirmasi unduhan:', err);
+                    isDownloading = false;
+                    progressPanel.className = "mt-6 bg-[#450a0a] border border-[#991b1b] rounded-xl overflow-hidden shadow-xl shadow-red-900/20";
+                    document.getElementById('pStatus').className = "font-bold bg-[#7f1d1d] text-red-300 px-3 py-1.5 rounded-lg border border-[#991b1b] inline-block truncate";
+                    document.getElementById('pStatus').innerText = "❌ Gagal konfirmasi: " + err.message;
+                    document.getElementById('pBar').className = "progress-bar bg-red-600 h-full rounded-full relative";
+                    document.getElementById('pSpinner').classList.add('hidden');
+                    btnC.disabled = false; btnC.innerText = '⬇️ Unduh ke Google Drive';
+                    document.getElementById('previewPanel').classList.remove('hidden');
+                }
             });
             
             // 🟢 LOAD HISTORY DENGAN TOMBOL VIEW (STREAMING MANUAL KE DRIVE) DI BAWAH TOMBOL DELETE
@@ -774,6 +894,54 @@ def get_full_ui(app_version, modals_html):
                 if (sessionToken) { openLogoutModal(); } 
                 else { startAuthFlow(); }
             });
+
+            // ===== AUTOMATION (DARI DATABASE) =====
+            async function loadAutomations() {
+                const list = document.getElementById('automationList');
+                if (!list) return;
+                try {
+                    list.innerHTML = '<div class="flex flex-col items-center justify-center h-40 text-center"><span class="text-4xl mb-2 opacity-50 animate-spin" style="width:1.5rem;height:1.5rem;font-size:1.5rem">⏳</span><p class="text-[#64748B] text-sm">Memuat automation...</p></div>';
+                    const res = await fetch('/api/automations');
+                    if (!res.ok) throw new Error(`HTTP Error ${res.status}: ${await res.text()}`);
+                    const data = await res.json();
+                    const items = data.items || [];
+
+                    if (!items.length) {
+                        list.innerHTML = '<div class="flex flex-col items-center justify-center h-40 text-center"><span class="text-4xl mb-2 opacity-50">🤖</span><p class="text-[#64748B] text-sm">Belum ada automation. Buat di database (automations table).</p></div>';
+                        return;
+                    }
+
+                    list.innerHTML = items.map(a => {
+                        const cfg = a.config ? JSON.stringify(a.config) : '{}';
+                        const enabled = a.enabled
+                            ? '<span class="px-2 py-0.5 bg-emerald-500/10 text-emerald-400 border-emerald-500/20 border rounded text-[10px] font-bold uppercase">Aktif</span>'
+                            : '<span class="px-2 py-0.5 bg-gray-500/10 text-gray-400 border-gray-600/30 border rounded text-[10px] font-bold uppercase">Nonaktif</span>';
+                        return `<div class="p-4 bg-[#1E293B] hover:bg-[#283548] border border-[#334155] rounded-xl transition-all">
+                            <div class="flex flex-wrap items-center justify-between gap-2">
+                                <div class="flex items-center gap-3 min-w-0">
+                                    <span class="text-xs font-mono text-[#14B8A6] bg-[#0F172A] px-2 py-1 rounded-lg border border-[#334155]">#${a.id}</span>
+                                    <h4 class="font-bold text-sm text-white truncate">${escapeHtml(a.name)}</h4>
+                                    ${enabled}
+                                </div>
+                                <div class="flex items-center gap-2 text-[11px] font-mono text-[#94A3B8]">
+                                    <span class="px-2 py-0.5 bg-[#0F172A] rounded-lg border border-[#334155]">setiap ${a.interval_minutes} menit</span>
+                                    <span class="px-2 py-0.5 bg-[#0F172A] rounded-lg border border-[#334155]">${escapeHtml(a.action)}</span>
+                                </div>
+                            </div>
+                            <div class="mt-2 text-[11px] text-[#94A3B8] font-mono bg-[#0A0F1C] rounded-lg border border-[#334155] p-2 break-all">config: ${escapeHtml(cfg)}</div>
+                            <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-1 text-[11px] text-[#64748B]">
+                                <span>Terakhir jalan: ${escapeHtml(a.last_run_at || '—')}</span>
+                                <span>Jalan lagi: ${escapeHtml(a.next_run_at || '—')}</span>
+                                <span>Dibuat: ${escapeHtml(a.created_at || '—')}</span>
+                                <span>Diperbarui: ${escapeHtml(a.updated_at || '—')}</span>
+                            </div>
+                        </div>`;
+                    }).join('');
+                } catch (err) {
+                    console.error('[API Error] Gagal memuat automation:', err);
+                    list.innerHTML = `<div class="text-center text-red-400 mt-4 p-4 bg-red-950/30 rounded-xl border border-red-900/50">❌ Gagal memuat automation.<br><span class="text-xs text-red-500/80">${escapeHtml(err.message)}</span></div>`;
+                }
+            }
 
             checkDriveStatus();
         </script>
