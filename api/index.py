@@ -74,7 +74,13 @@ def dispatch_repo(event_type,payload):
 
 def require_worker(req:Request):
     sec=(req.headers.get("x-worker-secret") or "").strip()
-    if not WORKER_SECRET or sec!=WORKER_SECRET:raise HTTPException(status_code=401,detail="X-Worker-Secret salah")
+    bearer=(req.headers.get("authorization") or "").strip()
+    gh_bearer=bearer[7:].strip() if bearer.lower().startswith("bearer ") else ""
+    if WORKER_SECRET and sec==WORKER_SECRET:
+        return
+    if GH_TOKEN and gh_bearer==GH_TOKEN:
+        return
+    raise HTTPException(status_code=401,detail="Worker authentication salah")
 
 def wib_time():return datetime.now(timezone(timedelta(hours=7))).strftime("%d %b %Y %H:%M WIB")
 
@@ -173,6 +179,10 @@ class DownloadRequest(BaseModel):
 @app.post("/api/download")
 def process_download(req:DownloadRequest):
     raw=req.url.strip()
+    # Normalisasi input kode agar karakter penutup yang tidak sengaja ikut ter-submit
+    # tidak menjadi bagian dari task_id dan payload repository_dispatch.
+    if raw.endswith(")") and raw.count("(") < raw.count(")"):
+        raw=raw[:-1].rstrip()
     if not raw:raise HTTPException(status_code=400,detail="Input kosong")
     if raw.startswith(("http://","https://")):raise HTTPException(status_code=400,detail="Masukkan kode pencarian, bukan URL!")
     _db_ready();email=get_session_email(req.session_token) if req.session_token else "";dupe=find_history_duplicate(raw,email) if email else None
