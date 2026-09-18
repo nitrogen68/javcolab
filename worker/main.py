@@ -46,56 +46,67 @@ def report(task_fields=None, history_item=None, force=False):
         return
     body = {"task_id": task_id, "task": {}}
     if _report_queue:
-        body["task"]["logs"] = _report_queue
+        body["task"]["logs"] = _report_queue[:100]
         _report_queue.clear()
     if task_fields:
         body["task"].update(task_fields)
     if history_item:
         body["history_item"] = history_item
+
+    headers = {"Content-Type": "application/json"}
+    if WORKER_SECRET:
+        headers["X-Worker-Secret"] = WORKER_SECRET
+    if GH_TOKEN:
+        headers["Authorization"] = f"Bearer {GH_TOKEN}"
+
     try:
         r = requests.post(
             f"{API_BASE}/api/task/report",
             json=body,
-            headers={"X-Worker-Secret": WORKER_SECRET, "Content-Type": "application/json"},
+            headers=headers,
             timeout=20,
         )
-        global _last_report_status
-        _last_report_status = r.status_code
-        log(f"[diag] API report HTTP {r.status_code}")
+        print(f"[diag] API report HTTP {r.status_code}", flush=True)
         if r.status_code != 200:
-            _report_queue.extend((body["task"].get("logs") or [])[:100])
-        else:
-            _last_report = now
+            failed_logs = body["task"].get("logs") or []
+            _report_queue[:0] = failed_logs
+            raise RuntimeError(f"API report HTTP {r.status_code}: {r.text[:300]}")
+        _last_report = now
     except Exception as e:
-        print(f"[report] warning: {e}", flush=True)
-        _report_queue_extend = (body["task"].get("logs") or [])[:100]
-        _report_queue.extend(_report_queue_extend)
-
-
+        print(f"[report] ERROR: {e}", flush=True)
+        raise
 def get_task():
     st = requests.get(f"{API_BASE}/api/progress/{requests.utils.quote(task_id, safe='')}",
                       timeout=20).json()
     return st
 
 
+def _worker_headers():
+    headers = {"Content-Type": "application/json"}
+    if WORKER_SECRET:
+        headers["X-Worker-Secret"] = WORKER_SECRET
+    if GH_TOKEN:
+        headers["Authorization"] = f"Bearer {GH_TOKEN}"
+    return headers
+
 def get_token(session_token):
     r = requests.get(
         f"{API_BASE}/api/token/{session_token}",
-        headers={"X-Worker-Secret": WORKER_SECRET}, timeout=20,
+        headers=_worker_headers(), timeout=20,
     )
     if r.status_code != 200:
-        raise Exception("Token Google Drive tidak ditemukan (login ulang)")
+        raise Exception(f"Token Google Drive tidak ditemukan (HTTP {r.status_code})")
     return r.json()
 
-
 def put_token(session_token, token):
-    requests.post(
+    r = requests.post(
         f"{API_BASE}/api/token/{session_token}",
         json=token,
-        headers={"X-Worker-Secret": WORKER_SECRET, "Content-Type": "application/json"},
+        headers=_worker_headers(),
         timeout=20,
     )
-
+    if r.status_code != 200:
+        raise Exception(f"Gagal menyimpan token Google Drive (HTTP {r.status_code})")
 
 def gh_put(path, content_b64):
     r = requests.get(f"https://api.github.com/repos/{GH_REPO}/contents/{path}",
