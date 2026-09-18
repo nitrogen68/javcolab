@@ -40,19 +40,18 @@ def log(msg):
 
 
 def report(task_fields=None, history_item=None, force=False):
-    global _last_report, _report_queue
+    global _last_report
     now = time.time()
     if not force and now - _last_report < 2.0 and not _report_queue:
         return
     body = {"task_id": task_id, "task": {}}
     if _report_queue:
-        body["task"]["logs"] = _report_queue[:100]
+        body["task"]["logs"] = _report_queue
         _report_queue.clear()
     if task_fields:
         body["task"].update(task_fields)
     if history_item:
         body["history_item"] = history_item
-
     try:
         r = requests.post(
             f"{API_BASE}/api/task/report",
@@ -60,17 +59,17 @@ def report(task_fields=None, history_item=None, force=False):
             headers={"X-Worker-Secret": WORKER_SECRET, "Content-Type": "application/json"},
             timeout=20,
         )
+        global _last_report_status
+        _last_report_status = r.status_code
+        log(f"[diag] API report HTTP {r.status_code}")
         if r.status_code != 200:
-            raise RuntimeError(
-                f"API report HTTP {r.status_code}: {r.text[:500]}"
-            )
-        _last_report = now
+            _report_queue.extend((body["task"].get("logs") or [])[:100])
+        else:
+            _last_report = now
     except Exception as e:
-        print(f"[report] ERROR: {e}", flush=True)
-        failed_logs = body["task"].get("logs") or []
-        if failed_logs:
-            _report_queue = (failed_logs + _report_queue)[:100]
-        raise
+        print(f"[report] warning: {e}", flush=True)
+        _report_queue_extend = (body["task"].get("logs") or [])[:100]
+        _report_queue.extend(_report_queue_extend)
 
 
 def get_task():
@@ -483,12 +482,12 @@ def run():
     log(f"🔍 Menerima input: '{raw_input}'")
     if not session_token:
         report({"status": "Gagal: harus login Google Drive"}, force=True)
-        raise RuntimeError("Task tidak memiliki session_token Google Drive")
+        raise RuntimeError("Sesi Google Drive tidak terhubung (login ulang di UI) — menandai run GitHub Actions sebagai FAILURE")
 
     token = get_token(session_token)
     if not token:
         report({"status": "Gagal: sesi Drive tidak valid"}, force=True)
-        return
+        raise RuntimeError("Sesi Google Drive tidak valid (login ulang) — menandai run GitHub Actions sebagai FAILURE")
 
     log("Progres sedang berlangsung: 20%")
 
