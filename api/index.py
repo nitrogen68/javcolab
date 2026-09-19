@@ -30,7 +30,7 @@ from ui.modal import get_modals_html
 
 app=FastAPI(title="Remote Uploader",docs_url=None,redoc_url=None)
 DEV_MODE=bool(int((os.environ.get("DEV") or "0").strip() or "0"))
-APP_VERSION="1.4.0 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
+APP_VERSION="1.4.1 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
 if DEV_MODE:APP_VERSION+=" · DEV (suggestion hover aktif)"
 
 GDRIVE_SCOPE="https://www.googleapis.com/auth/drive.file"

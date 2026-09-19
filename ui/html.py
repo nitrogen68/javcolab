@@ -452,7 +452,7 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 clearInterval(pollTimer);
                 logRenderState.maxStepRevealed = 0;
                 const progressPanel = document.getElementById('progressPanel');
-                pollTimer = setInterval(async () => {
+                const tick = async () => {
                     try {
                         const res = await fetch('/api/progress/' + encodeURIComponent(taskId));
                         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -529,11 +529,13 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                             document.getElementById('pSpinner').classList.add('hidden');
                             btn.disabled = false; btn.innerText = 'Cari & Tampilkan Preview'; btn.classList.remove('opacity-75');
                         }
-                    } catch (pollErr) {
-                        console.error('[API Error] Gagal membaca progress:', pollErr);
-                    }
-                }, 2000);
-            }
+                } catch (pollErr) {
+                    console.error('[API Error] Gagal membaca progress:', pollErr);
+                }
+            };
+            tick();
+            pollTimer = setInterval(tick, 2000);
+        }
 
             document.getElementById('uploadForm').addEventListener('submit', async (e) => {
                 e.preventDefault();
