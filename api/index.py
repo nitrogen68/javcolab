@@ -155,24 +155,36 @@ def resolve_run_after_dispatch(method:str):
 _iso_to_ms=lambda v: int(datetime.fromisoformat(str(v).replace("Z","+00:00")).timestamp()*1000) if v else 0
 
 _STEP_CACHE={}
-def gh_run_summary(run_id):
-    """Status run + daftar step job worker secara real-time dari GitHub API (cache 2.5 dtk).
+def _is_noise_gh_step(name):
+    """Step yang tidak perlu ditampilkan ke user:
+    'Post *' (post-job otomatis) & 'Upload worker diagnostics' (if: failure() —
+    tidak pernah jalan → akan selalu ⏳ di UI)."""
+    n=(name or "")
+    return n.startswith("Post ") or n=="Upload worker diagnostics"
 
-    Cache pendek agar step di-poll bertahap (Set up job → Checkout → ... → Run Puppeter)
-    dan sinkron dengan interval polling frontend (~2 dtk)."""
+def gh_run_summary(run_id):
+    """Status run + daftar step job worker real-time dari GitHub API (cache 1.5 dtk).
+
+    Cache pendek agar step muncul SATU-PERSATU sesuai progres nyata job
+    (Set up job → Checkout → ... → Run Puppeter), sinkron dengan polling UI ~2 dtk.
+    Step noise (Post */upload diagnostics) di-filter supaya alur terbaca akurat."""
     key=str(run_id);now=time.time();c=_STEP_CACHE.get(key)
-    if c and now-c[0]<2.5:return c[1]
+    if c and now-c[0]<1.5:return c[1]
     try:
         r=requests.get(f"https://api.github.com/repos/{GH_REPO}/actions/runs/{run_id}/jobs",headers=_gh_headers(),params={"per_page":20},timeout=12)
         if r.status_code!=200:_STEP_CACHE[key]=(now,{});return {}
         jobs=r.json().get("jobs",[])
         if not jobs:_STEP_CACHE[key]=(now,{});return {}
         j=jobs[0]
+        steps=[]
+        for s in j.get("steps",[]):
+            if _is_noise_gh_step(s.get("name","")):continue
+            steps.append({"number":s.get("number"),"name":s.get("name"),"status":s.get("status"),"conclusion":s.get("conclusion")})
         summary={
             "status":j.get("status",""),
             "conclusion":j.get("conclusion") or "",
             "name":j.get("name",""),
-            "steps":[{"number":s.get("number"),"name":s.get("name"),"status":s.get("status"),"conclusion":s.get("conclusion")} for s in j.get("steps",[])],
+            "steps":steps,
         }
         _STEP_CACHE[key]=(now,summary);return summary
     except Exception:return {}

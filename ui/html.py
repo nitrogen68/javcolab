@@ -416,25 +416,32 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 const post = splitIdx >= 0 ? logs.slice(splitIdx + 1) : [];
                 const gh = d.github || {};
                 const run = d.run || {};
-                const steps = Array.isArray(run.steps) ? run.steps : [];
-                // Hanya tampilkan step yang sudah mulai/selesai (status != 'queued').
-                const avail = steps.filter(s => s && s.status && s.status !== 'queued');
+                // Filter step noise (Post* & upload diagnostics) juga di client agar urutan
+                // alur GitHub akurat (server juga sudah memfilter, ini jaga-jaga).
+                const isNoiseStep = (name) => { const n = String(name || ''); return n.startsWith('Post ') || n === 'Upload worker diagnostics'; };
+                const stepsBase = (Array.isArray(run.steps) ? run.steps : []).filter(s => s && !isNoiseStep(s.name));
+                // Hanya tampilkan step yang sudah mulai/selesai (status != 'queued') —
+                // muncul SATU-PERSATU mengikuti progres asli job GitHub.
+                const avail = stepsBase.filter(s => s && s.status && s.status !== 'queued');
                 if (avail.length > logRenderState.maxStepRevealed) { logRenderState.maxStepRevealed = avail.length; }
-                const shown = steps.slice(0, logRenderState.maxStepRevealed);
+                const shown = stepsBase.slice(0, logRenderState.maxStepRevealed);
                 let html = '';
                 pre.forEach(l => { html += `<div>> ${escapeHtml(toMsg(l))}</div>`; });
+                // Status run di-refresh tiap poll (in_progress/completed/success).
+                const runStatus = run.status || gh.status || '';
                 if (shown.length) {
                     if (splitIdx < 0 && (gh.html_url || gh.run_id)) {
                         const runNo = gh.run_number || gh.run_id || '';
                         if (gh.html_url) {
-                            html += `<div class="gh-line">> ▶️ GitHub Action: <a href="${escapeHtml(gh.html_url)}" target="_blank" rel="noopener" class="underline text-[#22D3EE]">run #${escapeHtml(String(runNo))}</a>${run.status ? ` · <span class="gh-status">${escapeHtml(run.status)}</span>` : ''}</div>`;
+                            html += `<div class="gh-line">> ▶️ GitHub Action: <a href="${escapeHtml(gh.html_url)}" target="_blank" rel="noopener" class="underline text-[#22D3EE]">run #${escapeHtml(String(runNo))}</a>${runStatus ? ` · <span class="gh-status">${escapeHtml(runStatus)}</span>` : ''}</div>`;
                         } else {
-                            html += `<div class="gh-line">> ▶️ GitHub Action: run #${escapeHtml(String(runNo))}${run.status ? ` · ${escapeHtml(run.status)}` : ''}</div>`;
+                            html += `<div class="gh-line">> ▶️ GitHub Action: run #${escapeHtml(String(runNo))}${runStatus ? ` · ${escapeHtml(runStatus)}` : ''}</div>`;
                         }
                     }
-                    shown.forEach(s => {
+                    const total = stepsBase.length;
+                    shown.forEach((s, i) => {
                         const mark = s.status === 'completed' ? (s.conclusion === 'success' ? '✅' : '❌') : (s.status === 'in_progress' ? '🔄' : '⏳');
-                        html += `<div class="gh-step">>   ${mark} ${escapeHtml(s.name || '')}${s.status === 'in_progress' ? ' — sedang berjalan...' : ''}</div>`;
+                        html += `<div class="gh-step">>   ${mark} [${i + 1}/${total}] ${escapeHtml(s.name || '')}${s.status === 'in_progress' ? ' — sedang berjalan...' : ''}</div>`;
                     });
                 }
                 post.forEach(l => { html += `<div>> ${escapeHtml(toMsg(l))}</div>`; });
@@ -660,11 +667,18 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 } catch (err) { console.error('[API Error] Gagal reset state server:', err); }
 
                 currentTaskId = '';
-                // Hapus SEMUA state frontend: localStorage + sessionStorage -> UI benar-benar kosong.
-                try { localStorage.clear(); } catch (e) {}
+                // JANGAN log out Google Drive saat reset: simpan sesi, lalu bersihkan
+                // HANYA state task (PTASK_KEY & key lain), pertahankan 'driveSessionToken'.
+                const savedSession = (function () { try { return localStorage.getItem('driveSessionToken') || sessionToken || ''; } catch (e) { return sessionToken || ''; } })();
+                try {
+                    const keys = [];
+                    for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k) keys.push(k); }
+                    keys.forEach(k => { if (k !== 'driveSessionToken') localStorage.removeItem(k); });
+                } catch (e) {}
                 try { sessionStorage.clear(); } catch (e) {}
-                sessionToken = '';
-                updateDriveUI(false);
+                if (savedSession) { try { localStorage.setItem('driveSessionToken', savedSession); } catch (e) {} }
+                sessionToken = savedSession;
+                updateDriveUI(!!sessionToken);
                 const authPopover = document.getElementById('authPopover');
                 if (authPopover) authPopover.classList.add('hidden');
 
