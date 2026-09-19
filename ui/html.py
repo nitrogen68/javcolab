@@ -1198,4 +1198,3 @@ def get_full_ui(app_version, modals_html, is_dev=False):
     template = template.replace("__MODALS_INJECTION__", modals_html)
     template = template.replace("__IS_DEV__", "true" if is_dev else "false")
     return template
-true
