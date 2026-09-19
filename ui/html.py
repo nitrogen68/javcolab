@@ -28,7 +28,6 @@ def get_full_ui(app_version, modals_html, is_dev=False):
             .gh-line { color: #22D3EE; font-weight: 600; }
             .gh-line a { text-decoration: underline; }
             .gh-step { color: #67E8F9; opacity: 0.85; }
-            .test-active { background: rgba(245,158,11,.15); border-color: #F59E0B; color: #FBBF24; }
             .gh-status { color: #FBBF24; text-transform: capitalize; }
 
             .progress-bar.uploading {
@@ -74,10 +73,6 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                         </div>
                         <div id="errorMsg" class="hidden text-xs text-red-400 bg-red-950/40 p-3 rounded-lg border border-red-900">❌ Error: Masukan kode pencarian, bukan URL!</div>
                         <button type="submit" id="submitBtn" class="w-full h-12 mt-2 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white font-bold rounded-xl shadow-lg shadow-blue-900/30">Mulai Pencarian & Unduh</button>
-                        <div class="flex items-center justify-between gap-3 mt-3">
-                            <button type="button" id="testModeBtn" class="shrink-0 text-[10px] font-bold px-3 py-1.5 rounded-lg border transition bg-[#0F172A] border-[#334155] text-[#94A3B8] hover:text-white hover:border-[#14B8A6]">🧪 Mode Tes UI</button>
-                            <p id="testModeHint" class="hidden text-[10px] text-amber-400/90 font-semibold leading-tight">Tanpa login — simulasi dispatch+worker untuk verifikasi logika UI/backend. Tombol Reset tetap bisa dipakai.</p>
-                        </div>
                         <p id="loginWarning" class="hidden text-xs text-red-400 text-center mt-3 font-semibold transition-all">⚠️ Maaf, Anda harus login untuk menggunakan fitur ini.</p>
                     </form>
                     <div id="progressPanel" class="mt-6 hidden bg-[#1E293B] border border-[#334155] rounded-xl overflow-hidden shadow-xl">
@@ -232,7 +227,6 @@ def get_full_ui(app_version, modals_html, is_dev=False):
         <script>
             const IS_DEV = __IS_DEV__;
             let sessionToken = localStorage.getItem('driveSessionToken') || '';
-            let testMode = false;
             let pollTimer = null;
             let fileToDelete = null;
             let isDownloading = false;
@@ -543,35 +537,17 @@ def get_full_ui(app_version, modals_html, is_dev=False):
             pollTimer = setInterval(tick, 2000);
         }
 
-            document.getElementById('testModeBtn').addEventListener('click', () => {
-                testMode = !testMode;
-                const btn = document.getElementById('testModeBtn');
-                const hint = document.getElementById('testModeHint');
-                if (testMode) {
-                    btn.classList.add('test-active');
-                    btn.innerText = '🧪 Mode Tes UI: ON';
-                    if (hint) hint.classList.remove('hidden');
-                } else {
-                    btn.classList.remove('test-active');
-                    btn.innerText = '🧪 Mode Tes UI';
-                    if (hint) hint.classList.add('hidden');
-                }
-            });
-
             document.getElementById('uploadForm').addEventListener('submit', async (e) => {
                 e.preventDefault();
                 if (!sessionToken) {
-                    if (!testMode) {
-                        const warningText = document.getElementById('loginWarning');
-                        warningText.classList.remove('hidden');
-                        warningText.classList.add('animate-pulse');
-                        setTimeout(() => {
-                            warningText.classList.add('hidden');
-                            warningText.classList.remove('animate-pulse');
-                        }, 4000);
-                        return; 
-                    }
-                    sessionToken = '__TEST__';
+                    const warningText = document.getElementById('loginWarning');
+                    warningText.classList.remove('hidden');
+                    warningText.classList.add('animate-pulse');
+                    setTimeout(() => {
+                        warningText.classList.add('hidden');
+                        warningText.classList.remove('animate-pulse');
+                    }, 4000);
+                    return; 
                 }
 
                 autoContainer.classList.add('hidden');
@@ -604,7 +580,7 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                     const dlRes = await fetch('/api/download', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ url: val, filename: '', session_token: sessionToken, test: testMode })
+                        body: JSON.stringify({ url: val, filename: '', session_token: sessionToken })
                     });
                     
                     if (!dlRes.ok) throw new Error(`Server membalas dengan status: ${dlRes.status} - ${await dlRes.text()}`);
