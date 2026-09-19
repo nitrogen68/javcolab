@@ -518,6 +518,18 @@ def get_progress(task_id:str):
     out["mode"]=str(meta.get("mode") or ("download" if out["confirmed"] else "preview"))
     out["test"]=bool(meta.get("test"))
     github=dict(meta.get("github") or {})
+    # LAZY RUN RESOLUTION: right setelah workflow_dispatch HTTP 204, GitHub belum
+    # mencatat run-nya sehingga resolve di _launch_task sering gagal. Di sini run
+    # dicari ulang pada SETIAP poll (≈ sekali memanggil API GitHub) sampai ketemu —
+    # begitu ketemu, baris run + step muncul real-time, tanpa jeda diam di UI.
+    if not github.get("run_id"):
+        st=(t.get("status") or "")
+        if st not in ("Selesai","preview_ready","Gagal","Gagal: scheduling","Gagal unduhan"):
+            r=resolve_run_after_dispatch("workflow_dispatch")
+            if r:
+                github=r
+                try:patch_task_meta(t.get("task_id") or task_id,{"github":r})
+                except Exception:pass
     out["github"]=github
     if github.get("run_id"):
         try:out["run"]=gh_run_summary(github["run_id"])

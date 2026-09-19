@@ -420,11 +420,11 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 // alur GitHub akurat (server juga sudah memfilter, ini jaga-jaga).
                 const isNoiseStep = (name) => { const n = String(name || ''); return n.startsWith('Post ') || n === 'Upload worker diagnostics'; };
                 const stepsBase = (Array.isArray(run.steps) ? run.steps : []).filter(s => s && !isNoiseStep(s.name));
-                // Hanya tampilkan step yang sudah mulai/selesai (status != 'queued') —
-                // muncul SATU-PERSATU mengikuti progres asli job GitHub.
+                // Semua step ditampilkan BEGITU run ter-resolve (queued → ⏳) agar
+                // pohon workflow tampak real-time sejak detik pertama, tanpa jeda.
                 const avail = stepsBase.filter(s => s && s.status && s.status !== 'queued');
                 if (avail.length > logRenderState.maxStepRevealed) { logRenderState.maxStepRevealed = avail.length; }
-                const shown = stepsBase.slice(0, logRenderState.maxStepRevealed);
+                const shown = stepsBase;
                 let html = '';
                 pre.forEach(l => { html += `<div>> ${escapeHtml(toMsg(l))}</div>`; });
                 // Status run di-refresh tiap poll (in_progress/completed/success).
@@ -438,9 +438,16 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                             html += `<div class="gh-line">> ▶️ GitHub Action: run #${escapeHtml(String(runNo))}${runStatus ? ` · ${escapeHtml(runStatus)}` : ''}</div>`;
                         }
                     }
+                    const antri = shown.every(s => !s.status || s.status === 'queued');
+                    if (antri && runStatus !== 'completed') {
+                        html += `<div class="gh-step" style="color:#F59E0B">>   ⏳ Job menunggu runner GitHub Actions... (live)</div>`;
+                    }
                     const total = stepsBase.length;
                     shown.forEach((s, i) => {
-                        const mark = s.status === 'completed' ? (s.conclusion === 'success' ? '✅' : '❌') : (s.status === 'in_progress' ? '🔄' : '⏳');
+                        let mark = '⏳';
+                        if (s.status === 'completed') {
+                            mark = s.conclusion === 'success' ? '✅' : (['skipped', 'cancelled'].includes(s.conclusion) ? '⏭️' : '❌');
+                        } else if (s.status === 'in_progress') { mark = '🔄'; }
                         html += `<div class="gh-step">>   ${mark} [${i + 1}/${total}] ${escapeHtml(s.name || '')}${s.status === 'in_progress' ? ' — sedang berjalan...' : ''}</div>`;
                     });
                 }
@@ -534,7 +541,7 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 }
             };
             tick();
-            pollTimer = setInterval(tick, 2000);
+            pollTimer = setInterval(tick, 1500);
         }
 
             document.getElementById('uploadForm').addEventListener('submit', async (e) => {
