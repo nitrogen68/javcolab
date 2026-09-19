@@ -639,6 +639,64 @@ def wait_for_confirmation(timeout=WAIT_CONFIRM_TIMEOUT):
     return False
 
 
+def run_test_sim(raw_input):
+    """Simulasi lengkap alur UI/backend TANPA login (task bertanda TEST).
+
+    Menggantikan scraping + Google Drive dengan fase sintetis agar UI bisa
+    diverifikasi end-to-end: log real-time, step GitHub, bar progres, panel
+    preview, tombol konfirmasi, hingga panel Selesai."""
+    base = str(raw_input)
+    st = get_task()
+    confirmed = bool(st.get("confirmed"))
+    mode = str(st.get("mode") or "").lower()
+    if confirmed or mode == "download":
+        _simulate_download_phase(base)
+        return
+
+    log("🧪 MODE TEST — simulasi alur UI/backend (tanpa login Google Drive)")
+    log(f"📁 Google Drive folder: '{GDRIVE_FOLDER}' | Mode: TEST (PREVIEW)")
+    for p in (20, 40, 60, 75, 100):
+        report({"status": "Memproses pencarian...", "percent": p, "clean_title": f"[TEST] {base}"}, force=True)
+        log(f"Progres sedang berlangsung: {p}%")
+        log(f"🔄 [TEST] Simulasi pencarian/metadata {p}%...")
+        time.sleep(1.2)
+    fname = f"{base} - preview-test.mp4"
+    preview = {
+        "title": f"{base} — Sampel UI (TEST)",
+        "filename": fname,
+        "size": "512 MB",
+        "duration": "1:38:45",
+        "format": "1080p",
+        "thumb": "",
+    }
+    log(f"🖼️ Preview: {fname} (TEST)")
+    report({
+        "status": "preview_ready",
+        "percent": 100,
+        "clean_title": f"[TEST] {base}",
+        "preview": preview,
+        "confirmed": False,
+        "mode": "preview",
+    }, force=True)
+    log("✅ Preview siap (TEST). Klik 'Unduh ke Google Drive' untuk menguji alur konfirmasi.")
+    if not wait_for_confirmation():
+        log("⏳ TIME-OUT (TEST) — preview dibiarkan; gunakan tombol Reset di UI untuk membersihkan.")
+        return
+    _simulate_download_phase(base)
+
+
+def _simulate_download_phase(base):
+    log("📦 [TEST] Konfirmasi diterima — mensimulasikan unduh penuh + upload ke Drive...")
+    for p in (20, 45, 70, 90, 100):
+        report({"status": "Mengunduh (TEST)...", "percent": p, "clean_title": f"[TEST] {base}"}, force=True)
+        log(f"Progres sedang berlangsung: {p}%")
+        log(f"⬇️ [TEST] Mengunduh & mengunggah {p}%...")
+        time.sleep(1.0)
+    report({"status": "Selesai", "percent": 100, "downloaded": 1, "total": 1, "speed": 0,
+            "clean_title": f"[TEST] {base}"}, None, force=True)
+    log("🏁 Selesai (TEST) — alur konfirmasi → Selesai berhasil diverifikasi. Task tetap bisa di-reset dari UI.")
+
+
 def run():
     global task_id
     # GitHub Actions supplies TASK_ID from repository_dispatch/workflow_dispatch.
@@ -662,6 +720,11 @@ def run():
         log(f"▶️ GitHub Action: run #{_ctx.get('run_number') or _ctx.get('run_id')} — {_ctx.get('html_url')} (job: {_ctx.get('job')})")
 
     log(f"🔍 Menerima input: '{raw_input}'")
+    # MODE TEST: task bertanda TEST (code berawalan 'TEST' atau meta.test=true) →
+    # jalankan simulasi UI/backend TANPA login Google Drive.
+    if bool(st.get("test")) or str(raw_input).upper().startswith("TEST"):
+        run_test_sim(raw_input)
+        return
     log(f"📁 Google Drive folder: '{GDRIVE_FOLDER}' | Mode: {'PREVIEW' if is_preview else 'DOWNLOAD'}")
     if not session_token:
         report({"status": "Gagal: harus login Google Drive"}, force=True)

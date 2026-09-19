@@ -341,45 +341,46 @@ def api_token_save(session_token:str,req:Request,body:dict):
     require_worker(req);token=load_token(session_token) or {};token.update(body or {});save_token(session_token,token);return {"ok":True}
 
 class DownloadRequest(BaseModel):
-    url:str;filename:str="";session_token:str=""
+    url:str;filename:str="";session_token:str="";test:bool=False
 
-@app.post("/api/download")
-def process_download(req:DownloadRequest):
-    raw=_normalize_code(req.url)
-    if not raw:raise HTTPException(status_code=400,detail="Input kosong")
-    if raw.startswith(("http://","https://")):raise HTTPException(status_code=400,detail="Masukkan kode pencarian, bukan URL!")
-    if not req.session_token:
-        raise HTTPException(status_code=401,detail="Harus login Google Drive dulu sebelum unduh")
-    _db_ready();email=get_session_email(req.session_token) if req.session_token else ""
-    # Hanya skip dispatch jika worker BENAR-BENAR sedang jalan (bukan queued yang bisa stuck)
-    existing=get_task(raw)
-    active_statuses=("Memproses","Mengunduh","Mengunggah","Memproses pencarian...")
-    if existing and existing.get("status") in active_statuses:
-        return {"status":"started","task_id":raw,"skipped":"already_running","current_status":existing.get("status")}
-    # Log bersih: kalau kode sudah pernah diproses sebelumnya, hapus task + log + result
-    # lamanya dulu supaya tidak menumpuk (mis. 'Menerima input: X' berkali-kali).
-    # Progress baru dimulai murni dari 0% tanpa runId/preview lama.
-    # Lock 120 dtk: kode SAMA yang baru saja dibuat ditolak (429) supaya tidak ada
-    # dispatch/log duplikat (mis. LULU-435 dobel). Task lama (>2 mnt) dihapus lalu
-    # dibuat ulang dengan log bersih.
-    if existing:
-        created=existing.get("created_at")
-        if created:
-            try:
-                age=(datetime.now(timezone.utc)-datetime.fromisoformat(str(created).replace("Z","+00:00"))).total_seconds()
-                if age<120:
-                    raise HTTPException(status_code=429,detail=f"Kode {raw} baru saja diproses ({max(0,int(age))}s lalu) — token anti-duplikat: coba lagi dalam {max(1,int(120-age))} detik.")
-            except ValueError:
-                pass
-        delete_task(raw)
-    dupe=find_history_duplicate(raw,email) if email else None
-    if dupe:
-        create_task(raw,raw,req.session_token,{"clean_title":dupe.get("name",raw),"status_text":"Sudah ada di riwayat, unduhan dilewati."});update_task(raw,status="Selesai",progress=100,message="Sudah ada di riwayat",completed_at=datetime.now(timezone.utc));add_log(raw,f"✅ [DUPLIKAT] '{dupe.get('name',raw)}' sudah ada. Melewati unduhan.");return {"status":"started","task_id":raw,"skipped":"duplicate"}
-    # Selalu buat/update task + dispatch ulang (queued/gagal/selesai lama → coba lagi)
-    # Mode awal: PREVIEW (cari + metadata) dulu, unduh penuh HANYA setelah user konfirmasi.
-    create_task(raw,raw,req.session_token,{"clean_title":"","status_text":"Menunggu worker GitHub Actions...","created":wib_time(),"mode":"preview","confirmed":False})
-    add_log(raw,"⏳ Menjadwalkan ke GitHub Actions (mode PREVIEW)...")
-    update_task(raw,status="Scheduling",message="Memicu GitHub Actions...",session_token=req.session_token)
+def _launch_task(raw:str,session_token:str="",test:bool=False):
+    """Buat task lalu dispatch ke GitHub Actions. Dipakai jalur NORMAL dan jalur TEST.
+
+    - test=True → tidak butuh login, selalu mulai bersih (hapus task lama), tanpa lock
+      429 & tanpa cek history, cocok untuk verifikasi logika UI/backend berulang.
+    - Normal → proteksi duplikat (lock 120 dtk + cek history) + log bersih.
+    """
+    _db_ready()
+    if test:
+        # Uji: mulai murni dari 0% — hapus task lama (log + preview) biar tidak numpuk.
+        if get_task(raw):delete_task(raw)
+    else:
+        email=get_session_email(session_token) if session_token else ""
+        existing=get_task(raw)
+        active_statuses=("Memproses","Mengunduh","Mengunggah","Memproses pencarian...")
+        if existing and existing.get("status") in active_statuses:
+            return {"status":"started","task_id":raw,"skipped":"already_running","current_status":existing.get("status")}
+        if existing:
+            created=existing.get("created_at")
+            if created:
+                try:
+                    age=(datetime.now(timezone.utc)-datetime.fromisoformat(str(created).replace("Z","+00:00"))).total_seconds()
+                    if age<120:
+                        raise HTTPException(status_code=429,detail=f"Kode {raw} baru saja diproses ({max(0,int(age))}s lalu) — token anti-duplikat: coba lagi dalam {max(1,int(120-age))} detik.")
+                except ValueError:
+                    pass
+            delete_task(raw)
+        dupe=find_history_duplicate(raw,email) if email else None
+        if dupe:
+            create_task(raw,raw,session_token,{"clean_title":dupe.get("name",raw),"status_text":"Sudah ada di riwayat, unduhan dilewati."});update_task(raw,status="Selesai",progress=100,message="Sudah ada di riwayat",completed_at=datetime.now(timezone.utc));add_log(raw,f"✅ [DUPLIKAT] '{dupe.get('name',raw)}' sudah ada. Melewati unduhan.");return {"status":"started","task_id":raw,"skipped":"duplicate"}
+    meta={"clean_title":"","status_text":"Menunggu worker GitHub Actions...","created":wib_time(),"mode":"preview","confirmed":False}
+    if test:meta["test"]=True
+    create_task(raw,raw,session_token,meta)
+    if test:
+        add_log(raw,"🧪 [TEST] Menjadwalkan simulasi UI/backend ke GitHub Actions (tanpa login)...")
+    else:
+        add_log(raw,"⏳ Menjadwalkan ke GitHub Actions (mode PREVIEW)...")
+    update_task(raw,status="Scheduling",message="Memicu GitHub Actions..."+(" (TEST)" if test else ""),session_token=session_token)
     try:
         info=dispatch_repo("jav-task",{"task_id":raw})
         add_log(raw,f"✅ Dispatch berhasil via {info.get('method')} HTTP {info.get('status')} — cek tab Actions (Puppeter Worker)")
@@ -391,6 +392,56 @@ def process_download(req:DownloadRequest):
     except Exception as e:
         update_task(raw,status="Gagal: scheduling",message=f"Gagal dispatch GitHub Actions: {e}",error=str(e));add_log(raw,f"❌ {e}","error");raise HTTPException(status_code=500,detail=f"Gagal dispatch: {e}")
     return {"status":"started","task_id":raw,"dispatch":info}
+
+@app.post("/api/download")
+def process_download(req:DownloadRequest):
+    raw=_normalize_code(req.url)
+    if not raw:raise HTTPException(status_code=400,detail="Input kosong")
+    if raw.startswith(("http://","https://")):raise HTTPException(status_code=400,detail="Masukkan kode pencarian, bukan URL!")
+    test=bool(req.test) or raw.upper().startswith("TEST")
+    if not req.session_token and not test:
+        raise HTTPException(status_code=401,detail="Harus login Google Drive dulu sebelum unduh")
+    return _launch_task(raw,req.session_token or "",test)
+
+# ===== ENDPOINT KHUSUS TESTING UI & BACKEND (tanpa login) =====
+
+@app.get("/api/test/status")
+def api_test_status():
+    """Status lingkungan uji — dipakai UI Mode Tes tau test harness eksternal."""
+    return {"ok":True,"mode":"test","login_required":False,
+            "message":"Mode Tes aktif — jalankan simulasi dispatch+worker untuk memverifikasi logika UI/backend."}
+
+class TestRunRequest(BaseModel):
+    code:str="TEST-001"
+
+@app.post("/api/test/run")
+def api_test_run(body:TestRunRequest):
+    """Endpooint khusus testing UI & backend TANPA login sama sekali.
+
+    Membuat task bertanda TEST lalu dispatch ke worker GitHub Actions (NYATA).
+    Worker menjalankan simulasi penuh: log real-time, step GitHub, bar progres,
+    preview, konfirmasi, hingga Selesai — semua tampil di UI seperti produksi.
+    Gunakan /api/reset untuk membersihkan state hasil pengujian."""
+    _db_ready()
+    raw=_normalize_code(body.code or "TEST-001")
+    return _launch_task(raw,"",True)
+
+class TestResetRequest(BaseModel):
+    task_id:str=""
+
+@app.post("/api/test/reset")
+def api_test_reset(body:TestResetRequest):
+    """Reset khusus uji — membersihkan task TEST di server (log+preview+result).
+    Tidak memerlukan login; setara /api/reset untuk task bertanda TEST."""
+    _db_ready();tid=(body.task_id or "").strip()
+    if tid:
+        t=get_task(tid)
+        ok=bool(t) and bool((t.get("meta") or {}).get("test")) if t else False
+        if not ok and tid.upper().startswith("TEST"):ok=True
+        if ok:
+            delete_task(tid);return {"ok":True,"cleared":tid}
+        if t:raise HTTPException(status_code=403,detail="Hanya task TEST yang boleh di-reset lewat endpoint ini; gunakan /api/reset untuk task biasa.")
+    return {"ok":True,"cleared":None}
 
 class ConfirmRequest(BaseModel):
     task_id:str;session_token:str=""
@@ -465,6 +516,7 @@ def get_progress(task_id:str):
     out["preview"]=meta.get("preview") or None
     out["confirmed"]=bool(meta.get("confirmed"))
     out["mode"]=str(meta.get("mode") or ("download" if out["confirmed"] else "preview"))
+    out["test"]=bool(meta.get("test"))
     github=dict(meta.get("github") or {})
     out["github"]=github
     if github.get("run_id"):
