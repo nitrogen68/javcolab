@@ -146,9 +146,9 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                     <p id="driveEmail" class="text-sm font-semibold text-white truncate max-w-[280px] sm:max-w-xs px-2">-</p>
                 </div>
                 <div class="hidden md:block w-px h-16 bg-[#334155]"></div>
-                <div class="flex flex-col sm:flex-row items-center justify-center gap-3 shrink-0 relative w-full md:w-auto">
-                    <span id="driveStatusBadge" class="text-xs font-bold px-3 py-1.5 rounded-md bg-gray-700 text-gray-300 uppercase tracking-widest shadow-inner">Disconnect</span>
-                    <button id="driveActionBtn" class="text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg transition shadow-lg shadow-blue-900/30 whitespace-nowrap">Hubungkan Drive</button>
+                <div class="flex gap-2 items-center justify-center shrink-0 relative w-full">
+                    <span id="driveStatusBadge" class="flex-1 text-xs font-bold px-3 py-2.5 rounded-lg bg-gray-700 text-gray-300 uppercase tracking-widest shadow-inner text-center">Disconnect</span>
+                    <button id="driveActionBtn" class="flex-1 text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg transition shadow-lg shadow-blue-900/30 whitespace-nowrap">Hubungkan Drive</button>
                     
                     <div id="authPopover" class="hidden fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[92vw] sm:w-[320px] max-w-sm bg-[#1E293B] border border-[#334155] rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.9)] z-[80] p-5 text-center transition-all">
                         <div class="flex justify-between items-center mb-3">
@@ -992,8 +992,8 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                     driveIconSvg.classList.remove('text-gray-400');
                     driveEmail.innerText = email;
                     driveStatusBadge.innerText = 'Connected';
-                    driveStatusBadge.classList.remove('bg-gray-700', 'text-gray-300', 'bg-red-900', 'text-red-400');
-                    driveStatusBadge.classList.add('bg-blue-900', 'text-blue-400');
+                    driveStatusBadge.classList.remove('bg-gray-700', 'text-gray-300', 'bg-red-900', 'text-red-400', 'bg-blue-900', 'text-blue-400');
+                    driveStatusBadge.classList.add('bg-green-600', 'text-white');
                     driveActionBtn.innerText = 'Putuskan';
                     driveActionBtn.classList.remove('bg-blue-600', 'hover:bg-blue-700');
                     driveActionBtn.classList.add('bg-red-600', 'hover:bg-red-700');
@@ -1002,7 +1002,7 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                     driveIconSvg.classList.remove('text-blue-500');
                     driveEmail.innerText = '-';
                     driveStatusBadge.innerText = 'Disconnect';
-                    driveStatusBadge.classList.remove('bg-blue-900', 'text-blue-400', 'bg-red-900', 'text-red-400');
+                    driveStatusBadge.classList.remove('bg-green-600', 'text-white', 'bg-blue-900', 'text-blue-400', 'bg-red-900', 'text-red-400');
                     driveStatusBadge.classList.add('bg-gray-700', 'text-gray-300');
                     driveActionBtn.innerText = 'Hubungkan Drive';
                     driveActionBtn.classList.remove('bg-red-600', 'hover:bg-red-700');
@@ -1198,3 +1198,4 @@ def get_full_ui(app_version, modals_html, is_dev=False):
     template = template.replace("__MODALS_INJECTION__", modals_html)
     template = template.replace("__IS_DEV__", "true" if is_dev else "false")
     return template
+true
