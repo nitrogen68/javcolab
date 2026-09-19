@@ -29,6 +29,9 @@ GDRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 # Setelah preview siap, worker MENUNGGU konfirmasi user (tanpa re-run/dispatch baru).
 WAIT_CONFIRM_TIMEOUT = int(os.environ.get("WAIT_CONFIRM_TIMEOUT", "900"))
 CONFIRM_POLL_INTERVAL = 5
+# DoodStream (via API) — key diambil dari GitHub Actions secret DOOD_API_KEY.
+DOOD_API_BASE = "https://doodapi.co/api"
+DOOD_API_KEY = os.environ.get("DOOD_API_KEY", "").strip()
 
 
 def _normalize_gdrive_folder(raw=None):
@@ -124,6 +127,95 @@ def _worker_headers():
     if GH_TOKEN:
         headers["Authorization"] = f"Bearer {GH_TOKEN}"
     return headers
+
+
+def dood_local_upload(file_path, title=""):
+    """Upload file lokal ke akun DoodStream via API (multipart ke upload/server).
+    Mengembalikan filecode DoodStream."""
+    if not DOOD_API_KEY:
+        raise RuntimeError("DOOD_API_KEY belum diset (GitHub Actions secret)")
+    j = requests.get(f"{DOOD_API_BASE}/upload/server", params={"key": DOOD_API_KEY, "fld_id": "0"}, timeout=30).json()
+    srv = j.get("result") or ""
+    if not (isinstance(srv, str) and srv.startswith("http")):
+        raise RuntimeError(f"Dood upload/server gagal: {j.get('msg') or j}")
+    sep = "&" if "?" in srv else "?"
+    srv_url = srv.rstrip("/") + sep + f"api_key={DOOD_API_KEY}"
+    log(f"⬆️ DoodStream: upload ke {srv_url.split('/')[2]} ...")
+    with open(file_path, "rb") as f:
+        r = requests.post(
+            srv_url,
+            data={"api_key": DOOD_API_KEY},
+            files=[("file", (os.path.basename(file_path), f, "application/octet-stream"))],
+            timeout=1800,
+        )
+    try:
+        res = r.json().get("result")
+    except Exception:
+        raise RuntimeError(f"Respon upload DoodStream tidak valid: {r.text[:200]}")
+    fc = ""
+    if isinstance(res, str):
+        try:
+            import json as _json
+            fc = _json.loads(res).get("filecode", "") or res
+        except Exception:
+            fc = res
+    elif isinstance(res, dict):
+        fc = res.get("filecode", "")
+    if not fc:
+        raise RuntimeError(f"DoodStream upload gagal: {r.text[:200]}")
+    return str(fc)
+
+
+def dood_file_info(file_code):
+    """Info file DoodStream: mengembalikan dict (mis. download_url, size)."""
+    j = requests.get(f"{DOOD_API_BASE}/file/info", params={"key": DOOD_API_KEY, "file_code": file_code}, timeout=30).json()
+    res = j.get("result", [])
+    rows = res if isinstance(res, list) else ([res] if res else [])
+    return rows[0] if rows else {}
+
+
+def run_dood_upload(cdn, page_url, title, session_token, start_pct=20):
+    """Tujuan 'dood': unduh penuh lalu upload lokal ke DoodStream (via API)."""
+    log("🎬 Tujuan 'dood': mengunduh penuh lalu upload lokal ke DoodStream via API...")
+    fname = clean_filename(title, page_url)
+    tmpdir = "/tmp/runner"
+    os.makedirs(tmpdir, exist_ok=True)
+    out_path = os.path.join(tmpdir, fname)
+    report({"status": "Mengunduh...", "clean_title": title, "percent": start_pct})
+    total = 0
+    if ".m3u8" in cdn.lower():
+        total = download_hls(cdn, out_path, page_url, start_pct=start_pct)
+    else:
+        total = download_direct(cdn, out_path, page_url, start_pct=start_pct)
+    if total < MIN_FILESIZE:
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        raise Exception("Ukuran file terlalu kecil (< 5MB).")
+    report({"status": "Upload ke DoodStream (via API)...", "percent": 80}, force=True)
+    try:
+        fc = dood_local_upload(out_path, title)
+    finally:
+        if os.path.exists(out_path):
+            os.remove(out_path)
+    info = dood_file_info(fc)
+    url = info.get("download_url") or f"https://doodstream.com/d/{fc}"
+    size = info.get("size", "")
+    hist = {
+        "session_token": session_token,
+        "email": "",
+        "name": fname,
+        "size": size or format_size(total),
+        "time": wib(),
+        "status": "success",
+        "path": "",
+        "drive_file_id": "",
+        "dood_url": url,
+        "thumb": "",
+    }
+    report({"status": "Selesai", "percent": 100, "downloaded": total, "total": total,
+            "speed": 0, "clean_title": title, "status_text": "Berhasil disimpan ke DoodStream (via API).",
+            "dood_url": url, "dood_filecode": fc}, hist, force=True)
+    log(f"🎬 Selesai! File tersedia di DoodStream: {url}")
 
 def get_token(session_token):
     r = requests.get(
@@ -782,7 +874,7 @@ def run():
         after_confirmed = get_task()
         dest = str((after_confirmed.get("meta") or {}).get("destination") or "").lower()
         if dest == "dood":
-            log("🎬 Tujuan 'dood': remote upload ke DoodStream ditangani backend — worker selesai.")
+            run_dood_upload(cdn, page_url, title, session_token, start_pct=20)
             return
         if dest == "direct":
             log("📥 Tujuan 'direct': link CDN dikirim ke browser — worker selesai.")

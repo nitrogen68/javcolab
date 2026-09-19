@@ -33,6 +33,7 @@ jobs:
       GH_REPO: ${{ secrets.GH_REPO || github.repository }}
       GH_BRANCH: ${{ vars.GH_BRANCH || 'main' }}
       GDRIVE_FOLDER: ${{ secrets.GDRIVE_FOLDER || vars.GDRIVE_FOLDER || 'javColab' }}
+      DOOD_API_KEY: ${{ secrets.DOOD_API_KEY }}
       CI: "true"
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright
 
