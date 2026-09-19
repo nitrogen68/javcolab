@@ -60,7 +60,14 @@ def _db_ready():
 
 @app.on_event("startup")
 def startup():
-    if os.environ.get("DATABASE_URL"):init_db()
+    # Jangan biarkan kegagalan koneksi/migrasi PostgreSQL mematikan
+    # seluruh Vercel Function saat cold start. Endpoint akan mengembalikan
+    # 503 yang jelas melalui _db_ready() bila database belum siap.
+    if os.environ.get("DATABASE_URL"):
+        try:
+            init_db()
+        except Exception as e:
+            print(f"[startup] PostgreSQL belum siap: {e}", file=sys.stderr)
 
 def _gh_headers(extra=None,auth=True):
     h={"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}
