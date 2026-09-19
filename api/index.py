@@ -124,6 +124,19 @@ def dood_search_files(title,length=30):
         pass
     return "",{}
 
+def _dood_fallback(task_id):
+    """Terpanggil saat remote pull DoodStream gagal/stall di tengah (token CDN
+    kedaluwarsa dll) → umpan ke worker run BARU untuk unduh+upload lokal dari
+    runner dengan CDN SEGAR. Dispatch hanya SEKALI per task (fallback_dispatched)."""
+    try:
+        update_task(task_id,status="Mengunggah ke DoodStream (via API)...",message="Remote pull gagal — fallback unduh+upload lokal dari worker...",progress=50)
+        add_log(task_id,"🔄 Doodstream (via API): remote pull gagal di tengah — fallback unduh+upload lokal dari worker (CDN segar).")
+        dispatch_repo("preview_ready",{"task_id":task_id})
+        add_log(task_id,f"🔄 Fallback worker di-dispatch untuk task {task_id}.")
+    except Exception as e:
+        try:add_log(task_id,f"❌ Gagal dispatch fallback worker: {e}")
+        except Exception:pass
+
 
 def _db_ready():
     try:init_db();return True
@@ -664,33 +677,49 @@ def get_progress(task_id:str):
         dd=out["dood"] or {}
         fc=dd.get("filecode","")
         st=dd.get("status","")
-        if fc and st=="working":
+        if fc and st in ("working","remote_error"):
             now=time.time();last=float(dd.get("last_poll") or 0)
-            if now-last>=25:
+            if now-last>=20:
                 dd=dict(dd);dd["last_poll"]=now
+                if not dd.get("pull_started"):
+                    dd["pull_started"]=now;dd["prev_bytes"]=-1;dd["last_advance"]=now
                 try:patch_task_meta(t.get("task_id") or task_id,{"dood":dd})
                 except Exception:pass
                 try:
-                    pst,raw=dood_upload_status(fc)
-                    if pst in ("success","done","selesai","komplit","finished","complete"):
+                    pst,row=dood_upload_status(fc)
+                    bd=int((row.get("bytes_downloaded") if isinstance(row,dict) else 0) or 0)
+                    bt=int((row.get("bytes_total") if isinstance(row,dict) else 0) or 0)
+                    if bd!=dd.get("prev_bytes"):dd["prev_bytes"]=bd;dd["last_advance"]=now
+                    ended=bool(pst in ("error","failed","gagal","expired","canceled"))
+                    stalled=bool(dd.get("last_advance") and now-float(dd.get("last_advance") or 0)>900)
+                    overtime=bool(dd.get("pull_started") and now-float(dd.get("pull_started") or 0)>(45*60))
+                    done=bool(pst in ("success","done","selesai","komplit","finished","complete") or (bt>0 and bd>=bt))
+                    if done:
                         url,_inf=dood_file_info(fc)
-                        dd["status"]="done";dd["download_url"]=url;dd["last_poll"]=now
+                        dd["status"]="done";dd["download_url"]=url
                         try:patch_task_meta(t.get("task_id") or task_id,{"dood":dd,"dood_url":url})
                         except Exception:pass
                         update_task(task_id,status="Selesai",message="Upload ke DoodStream selesai.",progress=100)
                         add_log(task_id,f"🎬 Doodstream (via API): upload selesai — {url}")
-                    elif pst in ("error","failed","gagal","expired","canceled"):
-                        dd["status"]="error"
+                    elif ended or stalled or overtime:
+                        dd["status"]="remote_error"
+                        already=bool(dd.get("fallback_dispatched"))
+                        dd["fallback_dispatched"]=True
                         try:patch_task_meta(t.get("task_id") or task_id,{"dood":dd})
                         except Exception:pass
-                        add_log(task_id,f"🚫 Doodstream (via API): remote upload {pst}. {json.dumps(raw,ensure_ascii=False)[:300]}")
-                        update_task(task_id,status="Gagal",message="DoodStream remote upload gagal — coba lagi atau gunakan Google Drive.",progress=100)
-                    # 'working' → biarkan; poll berikutnya akan mencoba lagi
+                        if not already:
+                            _dood_fallback(task_id)
+                    else:
+                        # masih ditarik → tampilkan progres agar bar tidak diam
+                        if bt>0:
+                            pct=min(10+int(85*bd//bt),99)
+                            update_task(task_id,status="Mengunggah ke DoodStream (via API)...",message=f"DoodStream menarik CDN: {bd//1048576} MB / {bt//1048576} MB",progress=pct)
+                        try:patch_task_meta(t.get("task_id") or task_id,{"dood":dd})
+                        except Exception:pass
                 except Exception as e:
                     add_log(task_id,f"[dood poll skip] {e}")
         if dd.get("status")=="done":
-            out["dood"]=dd
-            out["status"]="Selesai";out["percent"]=100
+            out["dood"]=dd;out["status"]="Selesai";out["percent"]=100
     github=dict(meta.get("github") or {})
     # LAZY RUN RESOLUTION: right setelah workflow_dispatch HTTP 204, GitHub belum
     # mencatat run-nya sehingga resolve di _launch_task sering gagal. Di sini run

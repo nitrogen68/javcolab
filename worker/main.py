@@ -248,6 +248,15 @@ def run_dood_destination(cdn, page_url, title, session_token):
     """Tujuan 'dood': kirim URL CDN ke DoodStream via API upload/url; jika pull remote
     gagal/lewat waktu → fallback upload lokal dari runner (garansi tombol selalu berfungsi)."""
     fname = clean_filename(title, page_url)
+    # Segarkan CDN dulu (token baru). CDN playmogo/fast-stream diberi token+kedaluwarsa
+    # pendek — token lama membuat remote pull "putus di tengah" (kasus user barusan).
+    try:
+        fresh, _ft, _fp = asyncio.new_event_loop().run_until_complete(sniper_extract_cdn(page_url))
+        if fresh:
+            cdn = fresh
+            log("🔄 CDN di-refresh (token baru) agar remote/unduh tidak putus di tengah.")
+    except Exception as e:
+        log(f"[dood] refresh CDN skip: {str(e)[:120]}")
     log("🎬 Tujuan 'dood': mengirim URL CDN ke DoodStream via API (upload/url)...")
     try:
         fc, msg, raw = dood_remote_upload(cdn, title)
@@ -834,24 +843,19 @@ def wait_for_confirmation(timeout=WAIT_CONFIRM_TIMEOUT):
             st = get_task()
         except Exception:
             st = {}
-        if bool(st.get("confirmed")):
-            log("✅ Konfirmasi unduhan diterima — melanjutkan unduh penuh di run yang sama.")
-            return True
-        # Tujuan selain Google Drive ditangani BACKEND (DoodStream via API /
-        # unduh langsung). confirmed sengaja TIDAK di-set backend → worker pulang
-        # cepat tanpa menunggu timeout DAN tanpa lanjut ke Google Drive.
         dest = str(st.get("destination") or "").lower()
+        dood = st.get("dood") or {}
+        # Tujuan non-drive telanjur ditangani BACKEND/run lain → worker ini WAJIB
+        # pulang cepat (jangan unduh → jangan upload Google Drive, jangan dobel kerjain).
         if dest == "direct" and st.get("direct_url"):
             log("📥 Tujuan 'direct' diproses backend (link CDN dikirim ke browser) — worker selesai.")
             return False
-        if dest == "dood":
-            dd = st.get("dood") or {}
-            if dd.get("filecode") or dd.get("status") == "working":
-                log("🎬 Tujuan 'dood' diproses backend (DoodStream remote upload) — worker selesai.")
-                return False
-            if bool(st.get("confirmed")):
-                log("🔄 Dood remote ditolak backend — fallback worker (retry + upload lokal).")
-                return True
+        if dest == "dood" and (dood.get("filecode") or dood.get("status") in ("working", "done", "remote_error")):
+            log("🎬 Tujuan 'dood' ditangani backend/worker baru — worker ini selesai.")
+            return False
+        if bool(st.get("confirmed")):
+            log("✅ Konfirmasi unduhan diterima — melanjutkan unduh penuh di run yang sama.")
+            return True
         remaining = int(deadline - time.time())
         if remaining > 0 and remaining % 60 == 0:
             log(f"⏳ Menunggu konfirmasi unduhan... (sisa {remaining // 60} menit)")
@@ -932,6 +936,7 @@ def run():
     confirmed = bool(st.get("confirmed"))
     mode = str(st.get("mode") or ("download" if confirmed else "preview")).lower()
     is_preview = mode == "preview" and not confirmed
+    dest0 = str(st.get("destination") or (st.get("meta") or {}).get("destination") or "").lower()
 
     report({"status": "Memproses pencarian...", "percent": 0},
            {"id": task_id}, force=True)
@@ -952,7 +957,7 @@ def run():
         raise RuntimeError("Sesi Google Drive tidak terhubung (login ulang di UI) — menandai run GitHub Actions sebagai FAILURE")
 
     token = None
-    if not is_preview:
+    if not is_preview and dest0 not in ("dood", "direct"):
         token = get_token(session_token)
         if not token:
             report({"status": "Gagal: sesi Drive tidak valid"}, force=True)
@@ -977,6 +982,14 @@ def run():
 
     fname = clean_filename(title, page_url)
     log(f"📦 File target: {fname}")
+
+    # RUN FALLBACK (auto-dispatch saat dood remote gagal di tengah): meta sudah
+    # destination='dood' → langsung tangani tujuan dood (refresh CDN + remote,
+    # fallback unduh+upload lokal), tanpa menunggu konfirmasi UI.
+    if dest0 == "dood":
+        log("🎬 Tujuan dood (fallback/auto): remote via API → fallback unduh+upload lokal bila perlu.")
+        run_dood_destination(cdn, page_url, title, session_token)
+        return
 
     if is_preview:
         # MODE PREVIEW: scrape metadata SAJA, jangan unduh penuh.
