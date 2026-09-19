@@ -132,7 +132,11 @@ def _worker_headers():
 
 def dood_local_upload(file_path, title=""):
     """Upload file lokal ke akun DoodStream via API (multipart ke upload/server).
-    Mengembalikan filecode DoodStream."""
+    Mengembalikan filecode DoodStream. Response upload/server kadang berbentuk:
+      - str  : "UPLOAD SUCCESS" / juga bisa JSON string berisi filecode
+      - dict : {"filecode":..., "status":...}
+      - list : [{"filecode":..., ...}]  ← terjadi nyata: file SUDAH ter-upload
+    Semua bentuk diparse; kalau filecode belum ketemu, dicari via file/search."""
     if not DOOD_API_KEY:
         raise RuntimeError("DOOD_API_KEY belum diset (GitHub Actions secret)")
     j = requests.get(f"{DOOD_API_BASE}/upload/server", params={"key": DOOD_API_KEY, "fld_id": "0"}, timeout=30).json()
@@ -150,20 +154,48 @@ def dood_local_upload(file_path, title=""):
             timeout=1800,
         )
     try:
-        res = r.json().get("result")
+        jr = r.json()
     except Exception:
         raise RuntimeError(f"Respon upload DoodStream tidak valid: {r.text[:200]}")
-    fc = ""
-    if isinstance(res, str):
-        try:
-            import json as _json
-            fc = _json.loads(res).get("filecode", "") or res
-        except Exception:
-            fc = res
-    elif isinstance(res, dict):
-        fc = res.get("filecode", "")
+
+    def _take_fc(obj):
+        import json as _json
+        if isinstance(obj, dict):
+            return str(obj.get("filecode") or obj.get("file_code") or "")
+        if isinstance(obj, list) and obj:
+            return _take_fc(obj[0])
+        if isinstance(obj, str):
+            s = obj.strip()
+            try:
+                inner = _json.loads(s)
+                if isinstance(inner, dict):
+                    return _take_fc(inner)
+            except Exception:
+                pass
+            # "UPLOAD SUCCESS" / pesan lain bukan filecode → jangan diterima
+            return s if len(s) == 12 and s.isalnum() else ""
+        return ""
+
+    fc = _take_fc(jr.get("result")) if isinstance(jr, dict) else ""
+    if not fc and isinstance(jr, dict):
+        fc = _take_fc(jr)
     if not fc:
-        raise RuntimeError(f"DoodStream upload gagal: {r.text[:200]}")
+        log("⚠️ Respons upload tidak memuat filecode — mencoba menemukan file yang baru ter-upload via file/search...")
+        try:
+            s = requests.get(f"{DOOD_API_BASE}/file/search",
+                             params={"key": DOOD_API_KEY, "search_term": (title or "")[:100], "length": 20},
+                             timeout=30).json()
+            rows = s.get("result") if isinstance(s, dict) else s
+            rows = rows if isinstance(rows, list) else ([rows] if rows else [])
+            for row in rows:
+                if isinstance(row, dict) and (row.get("file_code") or row.get("filecode")):
+                    fc = str(row.get("file_code") or row.get("filecode"))
+                    break
+        except Exception:
+            fc = ""
+    if not fc:
+        raise RuntimeError(f"DoodStream upload gagal: {r.text[:300]}")
+    log(f"✅ File ter-upload ke DoodStream (filecode {fc}).")
     return str(fc)
 
 
