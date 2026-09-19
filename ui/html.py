@@ -66,8 +66,8 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                                 <input type="text" id="urlInput" required placeholder="Contoh: vema 263" autocomplete="off" class="flex-1 min-w-0 h-12 px-4 rounded-xl outline-none text-sm border focus:border-blue-500 transition-all bg-[#0A0F1C]">
                                 <button type="button" data-paste="urlInput" class="shrink-0 px-4 sm:px-5 h-12 bg-[#334155] hover:bg-[#475569] border border-[#334155] rounded-xl text-sm font-semibold text-[#E2E8F0]">Paste</button>
                             </div>
-                            <div id="autoSuggestContainer" class="mt-2 hidden">
-                                <p class="text-[10px] font-bold text-[#14B8A6] uppercase tracking-widest mb-1.5 flex items-center gap-1.5"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 1.1.9 2 2 2h12a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H6a2 2 0 00-2 2z"/></svg> Dari database Automation</p>
+                            <div id="autoSuggestContainer" class="mt-2 relative z-50 hidden">
+                                <p id="autoSuggestLabel" class="text-[10px] font-bold text-[#14B8A6] uppercase tracking-widest mb-1.5 flex items-center gap-1.5"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 1.1.9 2 2 2h12a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H6a2 2 0 00-2 2z"/></svg> <span>DEV MODE • Saran acak</span></p>
                                 <div id="autoSuggestList" class="flex flex-col gap-1.5 max-h-56 overflow-y-auto pr-1"></div>
                             </div>
                         </div>
@@ -327,43 +327,57 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 if (btn) { urlInput.value = btn.dataset.autoCode; autoContainer.classList.add('hidden'); urlInput.focus(); }
             });
 
-            // ===== RANDOM SUGGESTION ON HOVER (HANYA VERSI DEV) =====
+            // ===== RANDOM SUGGESTION ON HOVER (muncul SELALU, label DEV MODE) =====
+            const SUGGESTION_POOL = ['GEBB-029','LULU-435','VEMA-127','SONE-001','IPZZ-001','SSIS-001','SONE-233','IPX-901','SSIS-150','VEMA-212','GEBB-035','MIAA-501','STARS-912','JVLA-123','NACR-514','MIDV-655','ABP-984','HND-833','ZUKO-003','DSVR-146','AVOP-144','JUFE-404','MIDE-726','PPPD-884','SSNI-210','JUL-245','PRED-219','OKS-024','ONSD-999','MIGD-789','DASD-621','CJOD-313','WANZ-972','FJIN-018','BKKJ-190','KBI-070','SKYD-007','EBOD-812','MAAN-120','FACT-308','YUJ-004','SVMM-041','CHAV-001','MMBK-023','SDAB-111','CAFR-313','GVH-094','REBD-333','OFJE-189','MGOD-088'];
+            function shuffleArray(arr) {
+                const a = arr.slice();
+                for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+                return a;
+            }
             let hoverSuggestionTimer = null;
+            let autoHideTimer = null;
+            function scheduleHideAuto() {
+                clearTimeout(autoHideTimer);
+                autoHideTimer = setTimeout(() => { autoContainer.classList.add('hidden'); }, 300);
+            }
+            function showRandomSuggestions(codes) {
+                if (urlInput.value.trim()) return;
+                if (!codes.length) { autoContainer.classList.add('hidden'); return; }
+                const lbl = document.getElementById('autoSuggestLabel');
+                if (lbl) {
+                    lbl.querySelector('span').textContent = 'DEV MODE • Random ' + codes.length + ' suggestions';
+                }
+                autoList.innerHTML = codes.map(code => {
+                    const safeCode = escapeHtml(code);
+                    return `<button type="button" data-random-code="${safeCode}" class="text-left w-full px-3 py-2 rounded-lg bg-[#0F172A] border border-[#334155] hover:border-[#14B8A6] hover:bg-[#1a2742] text-sm text-[#E2E8F0] transition flex items-center gap-3">🎲<span class="min-w-0"><span class="block font-mono font-bold text-[#14B8A6]">${safeCode}</span><span class="block text-[10px] font-bold text-amber-400/90 mt-0.5">⚡ Saran acak (dev) — klik untuk cari langsung</span></span></button>`;
+                }).join('');
+                autoContainer.classList.remove('hidden');
+                autoList.scrollTop = 0;
+            }
             function loadRandomSuggestions() {
-                if (!IS_DEV) return;
                 if (urlInput.value.trim()) return;
                 const n = 10 + Math.floor(Math.random() * 11); // 10-20
                 fetch('/api/automation/random?n=' + n)
                     .then(res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
                     .then(data => {
-                        if (urlInput.value.trim()) return;
                         const results = data.results || [];
-                        if (!results.length) { autoContainer.classList.add('hidden'); return; }
-                        autoList.innerHTML = results.map(r => {
-                            const code = (r.code || r.id || r.name || '').trim();
-                            const title = r.title || '';
-                            const thumb = r.thumb || '';
-                            const safeCode = escapeHtml(code);
-                            const safeTitle = escapeHtml(title);
-                            const thumbHtml = thumb ? `<img src="${escapeHtml(thumb)}" class="w-9 h-9 rounded-md object-cover border border-[#334155] shrink-0" onerror="this.style.display='none'">` : `<div class="w-9 h-9 rounded-md bg-[#334155] flex items-center justify-center text-sm shrink-0">🎬</div>`;
-                            return `<button type="button" data-random-code="${safeCode}" class="text-left w-full px-3 py-2 rounded-lg bg-[#0F172A] border border-[#334155] hover:border-[#14B8A6] hover:bg-[#1a2742] text-sm text-[#E2E8F0] transition flex items-center gap-3">${thumbHtml}<span class="min-w-0"><span class="block font-mono font-bold text-[#14B8A6]">${safeCode}</span>${safeTitle ? `<span class="block text-xs text-[#94A3B8] truncate">${safeTitle}</span>` : ''}<span class="block text-[10px] font-bold text-amber-400/90 mt-0.5">⚡ Saran acak (dev) — klik untuk cari langsung</span></span></button>`;
-                        }).join('');
-                        autoContainer.classList.remove('hidden');
-                        autoList.scrollTop = 0;
+                        const codes = results.map(r => (r.code || r.id || r.name || '').trim()).filter(Boolean);
+                        if (codes.length) { showRandomSuggestions(codes.slice(0, n)); return; }
+                        showRandomSuggestions(shuffleArray(SUGGESTION_POOL).slice(0, n));
                     })
-                    .catch(e => console.error('[API Error] Gagal memuat saran acak:', e));
+                    .catch(e => {
+                        console.error('[API Error] Gagal memuat saran acak (fallback pool lokal):', e);
+                        showRandomSuggestions(shuffleArray(SUGGESTION_POOL).slice(0, n));
+                    });
             }
             urlInput.addEventListener('mouseenter', () => {
-                if (!IS_DEV) return;
                 clearTimeout(hoverSuggestionTimer);
-                hoverSuggestionTimer = setTimeout(loadRandomSuggestions, 450);
+                clearTimeout(autoHideTimer);
+                if (!urlInput.value.trim()) { hoverSuggestionTimer = setTimeout(loadRandomSuggestions, 450); }
             });
-            urlInput.addEventListener('mouseleave', () => {
-                clearTimeout(hoverSuggestionTimer);
-                setTimeout(() => { if (!autoContainer.matches(':hover')) { autoContainer.classList.add('hidden'); } }, 250);
-            });
-            autoContainer.addEventListener('mouseenter', () => clearTimeout(hoverSuggestionTimer));
-            autoContainer.addEventListener('mouseleave', () => autoContainer.classList.add('hidden'));
+            urlInput.addEventListener('mouseleave', scheduleHideAuto);
+            autoContainer.addEventListener('mouseenter', () => { clearTimeout(autoHideTimer); clearTimeout(hoverSuggestionTimer); });
+            autoContainer.addEventListener('mouseleave', scheduleHideAuto);
 
             // ===== FLOW PREVIEW → KONFIRMASI → DOWNLOAD =====
             function showPreview(d) {
@@ -384,29 +398,52 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 panel.classList.remove('hidden');
             }
 
+            // Urutan kronologis: dispatch logs → step GitHub → logs worker.
+            // Catat berapa banyak step yang sudah ter-reveal supaya muncul BERTAHAP,
+            // tidak dump sekaligus (monotonik — yang tampil tidak pernah menyusut).
+            let logRenderState = { maxStepRevealed: 0 };
             function renderLogs(d) {
                 const logBox = document.getElementById('logBox');
-                let html = '';
+                const logs = Array.isArray(d.logs) ? d.logs : [];
+                const toMsg = (l) => (l && l.message !== undefined) ? l.message : (l || '');
+                // Titik pisah: log baris "▶️ GitHub Action: run #..." yang ditulis server
+                // saat dispatch. Steps GitHub terjadi SETELAH baris ini, log worker SETELAH steps.
+                let splitIdx = -1;
+                for (let i = 0; i < logs.length; i++) {
+                    if (/GitHub Action:\s*run\s*#/.test(String(toMsg(logs[i])))) { splitIdx = i; }
+                }
+                const pre = splitIdx >= 0 ? logs.slice(0, splitIdx + 1) : logs;
+                const post = splitIdx >= 0 ? logs.slice(splitIdx + 1) : [];
                 const gh = d.github || {};
                 const run = d.run || {};
-                const runNo = gh.run_number || gh.run_id || '';
-                if (gh.html_url || runNo) {
-                    if (gh.html_url) {
-                        html += `<div class="gh-line">> ▶️ GitHub Action: <a href="${escapeHtml(gh.html_url)}" target="_blank" rel="noopener" class="underline text-[#22D3EE]">run #${escapeHtml(String(runNo))}</a>${run.status ? ` · <span class="gh-status">${escapeHtml(run.status)}</span>` : ''}</div>`;
-                    } else {
-                        html += `<div class="gh-line">> ▶️ GitHub Action: run #${escapeHtml(String(runNo))}${run.status ? ` · ${escapeHtml(run.status)}` : ''}</div>`;
+                const steps = Array.isArray(run.steps) ? run.steps : [];
+                // Hanya tampilkan step yang sudah mulai/selesai (status != 'queued').
+                const avail = steps.filter(s => s && s.status && s.status !== 'queued');
+                if (avail.length > logRenderState.maxStepRevealed) { logRenderState.maxStepRevealed = avail.length; }
+                const shown = steps.slice(0, logRenderState.maxStepRevealed);
+                let html = '';
+                pre.forEach(l => { html += `<div>> ${escapeHtml(toMsg(l))}</div>`; });
+                if (shown.length) {
+                    if (splitIdx < 0 && (gh.html_url || gh.run_id)) {
+                        const runNo = gh.run_number || gh.run_id || '';
+                        if (gh.html_url) {
+                            html += `<div class="gh-line">> ▶️ GitHub Action: <a href="${escapeHtml(gh.html_url)}" target="_blank" rel="noopener" class="underline text-[#22D3EE]">run #${escapeHtml(String(runNo))}</a>${run.status ? ` · <span class="gh-status">${escapeHtml(run.status)}</span>` : ''}</div>`;
+                        } else {
+                            html += `<div class="gh-line">> ▶️ GitHub Action: run #${escapeHtml(String(runNo))}${run.status ? ` · ${escapeHtml(run.status)}` : ''}</div>`;
+                        }
                     }
-                    (run.steps || []).forEach(s => {
+                    shown.forEach(s => {
                         const mark = s.status === 'completed' ? (s.conclusion === 'success' ? '✅' : '❌') : (s.status === 'in_progress' ? '🔄' : '⏳');
                         html += `<div class="gh-step">>   ${mark} ${escapeHtml(s.name || '')}${s.status === 'in_progress' ? ' — sedang berjalan...' : ''}</div>`;
                     });
                 }
-                if (d.logs && d.logs.length) html += d.logs.map(l => `<div>> ${escapeHtml(l)}</div>`).join('');
+                post.forEach(l => { html += `<div>> ${escapeHtml(toMsg(l))}</div>`; });
                 if (html) { logBox.innerHTML = html; logBox.scrollTop = logBox.scrollHeight; }
             }
 
             function startPolling(taskId) {
                 clearInterval(pollTimer);
+                logRenderState.maxStepRevealed = 0;
                 const progressPanel = document.getElementById('progressPanel');
                 pollTimer = setInterval(async () => {
                     try {
@@ -418,7 +455,8 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                         let pct = d.percent && d.percent > 0 ? Math.floor(d.percent) : 0;
                         if (pct <= 0 && d.logs && d.logs.length > 0) {
                             const lastLog = d.logs[d.logs.length - 1];
-                            const match = lastLog.match(/Progres sedang berlangsung: (\d+)%/);
+                            const lastMsg = (lastLog && lastLog.message !== undefined) ? lastLog.message : (lastLog || '');
+                            const match = lastMsg.match(/Progres sedang berlangsung: (\d+)%/);
                             if (match) { pct = parseInt(match[1]); }
                         }
                         const speedStr = d.speed > (1024 * 1024) ? (d.speed / 1024 / 1024).toFixed(2) + ' MB/s' : (d.speed / 1024).toFixed(0) + ' KB/s';
@@ -608,8 +646,11 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 clearInterval(pollTimer);
                 pollTimer = null;
                 isDownloading = false;
+                logRenderState.maxStepRevealed = 0;
 
-                // Hapus task/log/result lama di server (TANPA dispatch / memproses).
+                // Reset murni: hanya hapus state (task + log + preview) di server.
+                // TIDAK ada fetch ke /api/download atau /api/download/confirm — jadi
+                // "Menerima input" / "Memproses" TIDAK akan ter-trigger ulang.
                 try {
                     await fetch('/api/reset', {
                         method: 'POST',
@@ -619,42 +660,35 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 } catch (err) { console.error('[API Error] Gagal reset state server:', err); }
 
                 currentTaskId = '';
-                // Hapus SEMUA state frontend: localStorage + sessionStorage.
+                // Hapus SEMUA state frontend: localStorage + sessionStorage -> UI benar-benar kosong.
                 try { localStorage.clear(); } catch (e) {}
                 try { sessionStorage.clear(); } catch (e) {}
                 sessionToken = '';
                 updateDriveUI(false);
-                document.getElementById('authPopover').classList.add('hidden');
+                const authPopover = document.getElementById('authPopover');
+                if (authPopover) authPopover.classList.add('hidden');
 
+                const logBox = document.getElementById('logBox');
+                if (logBox) logBox.innerHTML = '';
                 const progressPanel = document.getElementById('progressPanel');
-                progressPanel.className = "mt-6 bg-[#1E293B] border border-[#334155] rounded-xl overflow-hidden shadow-xl";
-                progressPanel.classList.remove('hidden', 'opacity-0');
-                document.getElementById('previewPanel').classList.add('hidden');
-
-                document.getElementById('pBar').className = "progress-bar bg-gradient-to-r from-[#0D9488] to-[#14B8A6] h-full rounded-full relative";
-                document.getElementById('pBar').style.width = '0%';
-                document.getElementById('pPercent').innerText = '0%';
-                document.getElementById('pStatus').className = "font-medium bg-[#0F172A] text-[#94A3B8] px-3 py-1.5 rounded-lg border border-[#334155] inline-block truncate";
-                document.getElementById('pStatus').innerText = 'Menyiapkan...';
-                document.getElementById('pSpinner').classList.remove('hidden');
-                document.getElementById('pMeta').innerText = 'Size: 0 B • Speed: 0 KB/s';
-                document.getElementById('pFile').innerText = 'Memproses...';
-                document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> System initialized...</div>';
+                if (progressPanel) progressPanel.classList.add('hidden');
+                const previewPanel = document.getElementById('previewPanel');
+                if (previewPanel) previewPanel.classList.add('hidden');
+                const autoContainer = document.getElementById('autoSuggestContainer');
+                if (autoContainer) autoContainer.classList.add('hidden');
+                const input = document.getElementById('urlInput');
+                if (input) { input.value = ''; }
 
                 const submitBtn = document.getElementById('submitBtn');
                 submitBtn.disabled = false; submitBtn.innerText = 'Mulai Pencarian & Unduh'; submitBtn.classList.remove('opacity-75');
-
                 const confirmBtn = document.getElementById('confirmDownloadBtn');
                 confirmBtn.disabled = false; confirmBtn.innerText = '⬇️ Unduh ke Google Drive'; confirmBtn.classList.remove('opacity-50', 'cursor-not-allowed');
-
-                const input = document.getElementById('urlInput');
-                if (input) { input.value = ''; input.focus(); }
                 const errorMsg = document.getElementById('errorMsg');
                 if (errorMsg) errorMsg.classList.add('hidden');
-                const autoContainer = document.getElementById('autoSuggestContainer');
-                if (autoContainer) autoContainer.classList.add('hidden');
 
                 closeResetModal();
+                // Reload penuh → dijamin UI 100% bersih, tanpa sisa text "Memproses"/"Menerima input".
+                window.location.replace('/');
             }
 
             document.getElementById('resetBtn').addEventListener('click', resetTask);

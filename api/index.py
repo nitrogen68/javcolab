@@ -152,11 +152,16 @@ def resolve_run_after_dispatch(method:str):
     except Exception:return None
     return None
 
+_iso_to_ms=lambda v: int(datetime.fromisoformat(str(v).replace("Z","+00:00")).timestamp()*1000) if v else 0
+
 _STEP_CACHE={}
 def gh_run_summary(run_id):
-    """Status run + daftar step job worker secara real-time dari GitHub API (cache 8 dtk)."""
+    """Status run + daftar step job worker secara real-time dari GitHub API (cache 2.5 dtk).
+
+    Cache pendek agar step di-poll bertahap (Set up job → Checkout → ... → Run Puppeter)
+    dan sinkron dengan interval polling frontend (~2 dtk)."""
     key=str(run_id);now=time.time();c=_STEP_CACHE.get(key)
-    if c and now-c[0]<8:return c[1]
+    if c and now-c[0]<2.5:return c[1]
     try:
         r=requests.get(f"https://api.github.com/repos/{GH_REPO}/actions/runs/{run_id}/jobs",headers=_gh_headers(),params={"per_page":20},timeout=12)
         if r.status_code!=200:_STEP_CACHE[key]=(now,{});return {}
@@ -342,7 +347,18 @@ def process_download(req:DownloadRequest):
     # Log bersih: kalau kode sudah pernah diproses sebelumnya, hapus task + log + result
     # lamanya dulu supaya tidak menumpuk (mis. 'Menerima input: X' berkali-kali).
     # Progress baru dimulai murni dari 0% tanpa runId/preview lama.
+    # Lock 120 dtk: kode SAMA yang baru saja dibuat ditolak (429) supaya tidak ada
+    # dispatch/log duplikat (mis. LULU-435 dobel). Task lama (>2 mnt) dihapus lalu
+    # dibuat ulang dengan log bersih.
     if existing:
+        created=existing.get("created_at")
+        if created:
+            try:
+                age=(datetime.now(timezone.utc)-datetime.fromisoformat(str(created).replace("Z","+00:00"))).total_seconds()
+                if age<120:
+                    raise HTTPException(status_code=429,detail=f"Kode {raw} baru saja diproses ({max(0,int(age))}s lalu) — token anti-duplikat: coba lagi dalam {max(1,int(120-age))} detik.")
+            except ValueError:
+                pass
         delete_task(raw)
     dupe=find_history_duplicate(raw,email) if email else None
     if dupe:
@@ -433,7 +449,7 @@ def get_progress(task_id:str):
     _db_ready();t=get_task(task_id)
     if not t:return {}
     meta=t.pop("meta",{}) or {};code=t.get("code") or task_id
-    out={"id":code,"task_id":t.get("task_id"),"status":t.get("status"),"percent":t.get("progress",0),"speed":t.get("speed_kbps",0),"downloaded":meta.get("downloaded",0),"total":meta.get("total",t.get("size_bytes",0)),"clean_title":meta.get("clean_title",""),"status_text":t.get("message",meta.get("status_text","")),"logs":[x.get("message") for x in t.get("logs",[])],"created":meta.get("created",t.get("created_at")),"updated":t.get("updated_at"),"session_token":t.get("session_token","")}
+    out={"id":code,"task_id":t.get("task_id"),"status":t.get("status"),"percent":t.get("progress",0),"speed":t.get("speed_kbps",0),"downloaded":meta.get("downloaded",0),"total":meta.get("total",t.get("size_bytes",0)),"clean_title":meta.get("clean_title",""),"status_text":t.get("message",meta.get("status_text","")),"logs":[{"id":x.get("id"),"ts":_iso_to_ms(x.get("created_at")),"level":x.get("level","info"),"message":x.get("message","")} for x in t.get("logs",[])],"created":meta.get("created",t.get("created_at")),"updated":t.get("updated_at"),"session_token":t.get("session_token","")}
     out["preview"]=meta.get("preview") or None
     out["confirmed"]=bool(meta.get("confirmed"))
     out["mode"]=str(meta.get("mode") or ("download" if out["confirmed"] else "preview"))
