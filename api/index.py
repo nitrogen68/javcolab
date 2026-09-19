@@ -53,6 +53,51 @@ def _normalize_gdrive_folder(raw=None):
 
 GDRIVE_FOLDER=_normalize_gdrive_folder(os.environ.get("GDRIVE_FOLDER","javColab"))
 
+# DoodStream (via API) — API key disimpan sebagai env Vercel (TIDAK masuk repo).
+DOOD_API_KEY=os.environ.get("DOOD_API_KEY","").strip()
+DOOD_API_BASE="https://doodapi.co/api"
+
+def _dood_req(endpoint, **params):
+    """GET ke endpoint DoodStream API. Mengembalikan objek JSON mentah."""
+    if not DOOD_API_KEY:
+        raise RuntimeError("DOOD_API_KEY belum diset di environment Vercel")
+    p=dict(params);p.setdefault("key",DOOD_API_KEY)
+    r=requests.get(f"{DOOD_API_BASE}/{endpoint}",params=p,timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def dood_remote_upload(url, title=""):
+    """Tarik file dari URL publik/CDN ke akun DoodStream.
+    Mengembalikan tuple (filecode, message)."""
+    j=_dood_req("upload/url",url=url,new_title=(title or "")[:200])
+    res=j.get("result")
+    if isinstance(res,dict):
+        fc=res.get("filecode") or ""
+        if fc:return fc,str(j.get("msg") or "")
+        raise RuntimeError(str(j.get("msg") or j))
+    if isinstance(res,list):
+        if res and res[0].get("filecode"):
+            return res[0]["filecode"],str(j.get("msg") or "")
+        raise RuntimeError(str(j.get("msg") or "File sudah ada di DoodStream / gagal remote upload"))
+    raise RuntimeError(str(j.get("msg") or j))
+
+def dood_upload_status(file_code):
+    """Status remote upload: {'filecode','bytes_downloaded','bytes_total','status',...}."""
+    j=_dood_req("urlupload/status",file_code=file_code)
+    res=j.get("result",[])
+    rows=res if isinstance(res,list) else ([res] if res else [])
+    for row in rows:
+        if isinstance(row,dict) and row.get("filecode")==file_code:
+            return row
+    return rows[0] if rows else {}
+
+def dood_file_info(file_code):
+    """Info file di DoodStream: {'filecode','title','size','length','download_url',...}."""
+    j=_dood_req("file/info",file_code=file_code)
+    res=j.get("result",[])
+    rows=res if isinstance(res,list) else ([res] if res else [])
+    return rows[0] if rows else {}
+
 
 def _db_ready():
     try:init_db();return True
@@ -451,7 +496,7 @@ def api_test_reset(body:TestResetRequest):
     return {"ok":True,"cleared":None}
 
 class ConfirmRequest(BaseModel):
-    task_id:str;session_token:str=""
+    task_id:str;session_token:str="";destination:str="drive"
 
 class ResetRequest(BaseModel):
     task_id:str="";session_token:str=""
@@ -477,18 +522,56 @@ def hard_reset(req:ResetRequest):
 @app.post("/api/download/confirm")
 def confirm_download(req:ConfirmRequest):
     """Konfirmasi preview → worker yang SAMA (sedang menunggu) melanjutkan unduh
-    penuh tanpa dispatch/re-run baru. Progres berlanjut, tidak di-reset."""
+    penuh tanpa dispatch/re-run baru. Progres berlanjut, tidak di-reset.
+
+    destination:
+      - drive  : (default) unduh penuh oleh worker → upload ke Google Drive.
+      - dood   : backend menarik file via remote upload ke akun DoodStream (worker selesai).
+      - direct : unduhan langsung — UI membuka link CDN mp4 di browser (worker selesai).
+    """
     tid=req.task_id.strip()
     if not tid:raise HTTPException(status_code=400,detail="task_id wajib")
     if not req.session_token:raise HTTPException(status_code=401,detail="Harus login Google Drive dulu")
     _db_ready();current=get_task(tid)
     if not current:raise HTTPException(status_code=404,detail=f"Task {tid} tidak ditemukan")
+    meta=dict(current.get("meta") or {})
+    dest=str(req.destination or "").lower().strip() or "drive"
+    if dest not in ("drive","dood","direct"):
+        raise HTTPException(status_code=400,detail=f"destination tidak dikenal: {dest}")
     if current.get("confirmed"):
-        return {"status":"already_confirmed","task_id":tid,"current_status":current.get("status")}
-    meta=dict(current.get("meta") or {});meta["confirmed"]=True;meta["mode"]="download"
+        if dest=="dood" and (meta.get("dood") or {}).get("filecode"):
+            return {"status":"already_confirmed","task_id":tid,"current_status":current.get("status"),"destination":"dood","file_code":(meta.get("dood") or {}).get("filecode")}
+        return {"status":"already_confirmed","task_id":tid,"current_status":current.get("status"),"destination":meta.get("destination") or dest}
+    meta=dict(meta);meta["confirmed"]=True;meta["mode"]="download";meta["destination"]=dest
+    if dest=="dood":
+        cdn=meta.get("cdn","")
+        if not cdn:
+            raise HTTPException(status_code=400,detail="Link CDN belum tersedia — jalankan mode Google Drive dulu atau ulangi pencarian")
+        title=meta.get("clean_title") or (meta.get("preview") or {}).get("title","") or tid
+        try:
+            file_code,_msg=dood_remote_upload(cdn,title)
+        except Exception as e:
+            meta.pop("confirmed",None);meta.pop("destination",None)
+            patch_task_meta(tid,meta)
+            raise HTTPException(status_code=502,detail=f"Gagal upload ke DoodStream: {e}")
+        meta["dood"]={"filecode":file_code,"title":title,"status":"working","bytes_downloaded":0,"bytes_total":0}
+        patch_task_meta(tid,meta)
+        add_log(tid,"🎬 DoodStream (via API): remote upload dimulai — file ditarik dari CDN source.")
+        update_task(tid,meta=meta,session_token=req.session_token,status="Mengunggah ke DoodStream (via API)...",message="DoodStream menarik file dari CDN source...",progress=5)
+        return {"status":"confirmed","task_id":tid,"confirmed":True,"destination":"dood","file_code":file_code}
+    if dest=="direct":
+        cdn=meta.get("cdn","")
+        if not cdn:
+            raise HTTPException(status_code=400,detail="Link CDN belum tersedia — jalankan mode Google Drive dulu atau ulangi pencarian")
+        meta["direct_url"]=cdn
+        patch_task_meta(tid,meta)
+        add_log(tid,"📥 Unduh langsung (offline): link CDN mp4 dikirim ke browser Anda.")
+        update_task(tid,meta=meta,session_token=req.session_token,status="Selesai",message="Unduhan langsung dibuka di browser Anda (offline file).",progress=100)
+        return {"status":"confirmed","task_id":tid,"confirmed":True,"destination":"direct","url":cdn}
+    meta=dict(meta);meta["confirmed"]=True;meta["mode"]="download";meta["destination"]="drive"
     update_task(tid,meta=meta,session_token=req.session_token,status="Memproses unduhan...",message="Konfirmasi diterima — mendownload penuh...",progress=20)
     add_log(tid,"✅ Konfirmasi diterima — worker melanjutkan unduh penuh tanpa restart.")
-    return {"status":"confirmed","task_id":tid,"confirmed":True}
+    return {"status":"confirmed","task_id":tid,"confirmed":True,"destination":"drive"}
 
 class ReportBody(BaseModel):
     task_id:str;task:dict={};history_item:dict|None=None
@@ -524,6 +607,46 @@ def get_progress(task_id:str):
     out["confirmed"]=bool(meta.get("confirmed"))
     out["mode"]=str(meta.get("mode") or ("download" if out["confirmed"] else "preview"))
     out["test"]=bool(meta.get("test"))
+    out["destination"]=str(meta.get("destination") or "")
+    out["cdn"]=meta.get("cdn","")
+    out["direct_url"]=meta.get("direct_url","")
+    out["drive_file_id"]=meta.get("drive_file_id","")
+    dood=dict(meta.get("dood") or {})
+    out["dood"]=dood
+    # LAZY DOOD RESOLUTION: remote upload berjalan di sisi backend; setiap poll kita
+    # cek urlupload/status sampai selesai/gagal lalu update status task + riwayat.
+    if dood.get("filecode") and dood.get("status")=="working" and str(t.get("status"))!="Gagal":
+        try:
+            tr=dood_upload_status(dood["filecode"])
+        except Exception:
+            tr={}
+        if tr:
+            bd=int(tr.get("bytes_downloaded") or 0);bt=int(tr.get("bytes_total") or 0)
+            st_raw=str(tr.get("status") or "").lower()
+            done_val=st_raw in ("completed","complete","done","success","10","100") or (bt>0 and bd>=bt)
+            dood["bytes_downloaded"]=bd;dood["bytes_total"]=bt
+            if done_val:
+                try:info=dood_file_info(dood["filecode"])
+                except Exception:info={}
+                dood["status"]="completed"
+                dood["url"]=info.get("download_url") or f"https://doodstream.com/d/{dood['filecode']}"
+                dood["size"]=info.get("size","")
+                meta["dood"]=dood;meta["result"]="dood"
+                upsert_history({"session_token":t.get("session_token",""),"name":dood.get("title") or tid,"size":str(dood.get("size") or ""),"time":wib_time(),"status":"success","dood_url":dood.get("url","")})
+                update_task(t.get("task_id") or task_id,meta=meta,status="Selesai",message="Berhasil diunggah ke DoodStream (via API).",progress=100,result=dood.get("url",""))
+                add_log(t.get("task_id") or task_id,f"🎬 DoodStream selesai: {dood.get('url','')}")
+                out["status"]="Selesai";out["percent"]=100;out["result"]=dood.get("url","");out["status_text"]="Berhasil diunggah ke DoodStream (via API)."
+            elif st_raw in ("error","failure","failed","canceled","cancelled"):
+                dood["status"]="error";meta["dood"]=dood
+                update_task(t.get("task_id") or task_id,meta=meta,status="Gagal",message="Upload DoodStream gagal.",progress=100)
+                out["status"]="Gagal";out["status_text"]="Upload DoodStream gagal."
+            else:
+                pct=5 + (90*bd//bt) if bt>0 else 5
+                pct=min(pct,99)
+                meta["dood"]=dood
+                update_task(t.get("task_id") or task_id,meta=meta,progress=pct,status="Mengunggah ke DoodStream (via API)...",message=f"DoodStream: {bd//1024//1024 if bd else 0} MB / {bt//1024//1024 if bt else 0} MB")
+                out["percent"]=pct;out["status"]="Mengunggah ke DoodStream (via API)...";out["status_text"]=f"DoodStream: {bd//1024//1024 if bd else 0} MB / {bt//1024//1024 if bt else 0} MB"
+    if dood.get("status")=="completed":out["dood"]=dood
     github=dict(meta.get("github") or {})
     # LAZY RUN RESOLUTION: right setelah workflow_dispatch HTTP 204, GitHub belum
     # mencatat run-nya sehingga resolve di _launch_task sering gagal. Di sini run

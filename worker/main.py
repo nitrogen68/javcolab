@@ -767,13 +767,26 @@ def run():
             "percent": 100,
             "clean_title": title,
             "preview": preview,
+            "cdn": cdn,
+            "page_url": page_url,
             "confirmed": False,
             "mode": "preview",
         }, force=True)
-        log("✅ Preview siap. Klik 'Unduh ke Google Drive' untuk mengunduh penuh.")
+        log("✅ Preview siap — pilih tujuan: Google Drive, Doodstream (via API), atau Unduh Langsung.")
         # Tunggu konfirmasi user di run yang SAMA (jangan re-dispatch/restart).
         if not wait_for_confirmation():
             return  # exit 0
+        # Tujuan selain Google Drive ditangani oleh backend (DoodStream via API /
+        # unduh langsung) — worker selesai tanpa unduh lokal. Hanya mode 'drive'
+        # yang melanjutkan unduh penuh + upload ke Drive.
+        after_confirmed = get_task()
+        dest = str((after_confirmed.get("meta") or {}).get("destination") or "").lower()
+        if dest == "dood":
+            log("🎬 Tujuan 'dood': remote upload ke DoodStream ditangani backend — worker selesai.")
+            return
+        if dest == "direct":
+            log("📥 Tujuan 'direct': link CDN dikirim ke browser — worker selesai.")
+            return
         token = get_token(session_token)
         if not token:
             report({"status": "Gagal: sesi Drive tidak valid"}, force=True)
