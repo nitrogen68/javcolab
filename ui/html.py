@@ -318,9 +318,7 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 if (rnd) {
                     urlInput.value = rnd.dataset.randomCode;
                     autoContainer.classList.add('hidden');
-                    const form = document.getElementById('uploadForm');
-                    if (form && typeof form.requestSubmit === 'function') { form.requestSubmit(); }
-                    else { form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true })); }
+                    urlInput.focus();
                     return;
                 }
                 const btn = e.target.closest('[data-auto-code]');
@@ -349,7 +347,7 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 }
                 autoList.innerHTML = codes.map(code => {
                     const safeCode = escapeHtml(code);
-                    return `<button type="button" data-random-code="${safeCode}" class="text-left w-full px-3 py-2 rounded-lg bg-[#0F172A] border border-[#334155] hover:border-[#14B8A6] hover:bg-[#1a2742] text-sm text-[#E2E8F0] transition flex items-center gap-3">🎲<span class="min-w-0"><span class="block font-mono font-bold text-[#14B8A6]">${safeCode}</span><span class="block text-[10px] font-bold text-amber-400/90 mt-0.5">⚡ Saran acak (dev) — klik untuk cari langsung</span></span></button>`;
+                    return `<button type="button" data-random-code="${safeCode}" class="text-left w-full px-3 py-2 rounded-lg bg-[#0F172A] border border-[#334155] hover:border-[#14B8A6] hover:bg-[#1a2742] text-sm text-[#E2E8F0] transition flex items-center gap-3">🎲<span class="min-w-0"><span class="block font-mono font-bold text-[#14B8A6]">${safeCode}</span><span class="block text-[10px] font-bold text-amber-400/90 mt-0.5">⚡ Saran acak (dev) — klik untuk mengisi kode</span></span></button>`;
                 }).join('');
                 autoContainer.classList.remove('hidden');
                 autoList.scrollTop = 0;
@@ -399,65 +397,117 @@ def get_full_ui(app_version, modals_html, is_dev=False):
             }
 
             // Urutan kronologis: dispatch logs → step GitHub → logs worker.
-            // Catat berapa banyak step yang sudah ter-reveal supaya muncul BERTAHAP,
-            // tidak dump sekaligus (monotonik — yang tampil tidak pernah menyusut).
-            let logRenderState = { maxStepRevealed: 0 };
+            // Urutan kronologis pada logBox di-streaming INCREMENTAL: tiap baris
+            // muncul satu per satu (urut timestamp ASC) dengan delay acak 250–800 ms,
+            // bukan dump sekaligus. Baris yang sudah tampil tidak pernah mengecil;
+            // status step/run yang sudah muncul tetap di-refresh in-place tiap poll.
+            const stepDelayMs = () => 250 + Math.random() * 550;
+            let logStream = { dom: {}, pending: [], appending: false };
+            function resetLogStream() {
+                logStream.dom = {};
+                logStream.pending = [];
+                logStream.appending = false;
+            }
+            function scheduleLogFlush() {
+                if (logStream.appending) return;
+                logStream.appending = true;
+                const flush = () => {
+                    const logBox = document.getElementById('logBox');
+                    if (logStream.pending.length && logBox) {
+                        const key = logStream.pending.shift();
+                        const el = logStream.dom[key];
+                        if (el && !el.parentNode) { logBox.appendChild(el); logBox.scrollTop = logBox.scrollHeight; }
+                        setTimeout(flush, stepDelayMs());
+                    } else {
+                        logStream.appending = false;
+                    }
+                };
+                setTimeout(flush, stepDelayMs());
+            }
             function renderLogs(d) {
-                const logBox = document.getElementById('logBox');
                 const logs = Array.isArray(d.logs) ? d.logs : [];
                 const toMsg = (l) => (l && l.message !== undefined) ? l.message : (l || '');
+                // Urutkan berdasarkan timestamp ASC (server sudah terurut; ini jaga-jaga).
+                const sorted = logs.slice().sort((a, b) => ((a && a.ts) || 0) - ((b && b.ts) || 0));
                 // Titik pisah: log baris "▶️ GitHub Action: run #..." yang ditulis server
                 // saat dispatch. Steps GitHub terjadi SETELAH baris ini, log worker SETELAH steps.
                 let splitIdx = -1;
-                for (let i = 0; i < logs.length; i++) {
-                    if (/GitHub Action:\s*run\s*#/.test(String(toMsg(logs[i])))) { splitIdx = i; }
+                for (let i = 0; i < sorted.length; i++) {
+                    if (/GitHub Action:\s*run\s*#/.test(String(toMsg(sorted[i])))) { splitIdx = i; }
                 }
-                const pre = splitIdx >= 0 ? logs.slice(0, splitIdx + 1) : logs;
-                const post = splitIdx >= 0 ? logs.slice(splitIdx + 1) : [];
+                const pre = splitIdx >= 0 ? sorted.slice(0, splitIdx + 1) : sorted;
+                const post = splitIdx >= 0 ? sorted.slice(splitIdx + 1) : [];
                 const gh = d.github || {};
                 const run = d.run || {};
                 // Filter step noise (Post* & upload diagnostics) juga di client agar urutan
                 // alur GitHub akurat (server juga sudah memfilter, ini jaga-jaga).
                 const isNoiseStep = (name) => { const n = String(name || ''); return n.startsWith('Post ') || n === 'Upload worker diagnostics'; };
                 const stepsBase = (Array.isArray(run.steps) ? run.steps : []).filter(s => s && !isNoiseStep(s.name));
-                // Semua step ditampilkan BEGITU run ter-resolve (queued → ⏳) agar
-                // pohon workflow tampak real-time sejak detik pertama, tanpa jeda.
-                const avail = stepsBase.filter(s => s && s.status && s.status !== 'queued');
-                if (avail.length > logRenderState.maxStepRevealed) { logRenderState.maxStepRevealed = avail.length; }
-                const shown = stepsBase;
-                let html = '';
-                pre.forEach(l => { html += `<div>> ${escapeHtml(toMsg(l))}</div>`; });
-                // Status run di-refresh tiap poll (in_progress/completed/success).
                 const runStatus = run.status || gh.status || '';
-                if (shown.length) {
-                    if (splitIdx < 0 && (gh.html_url || gh.run_id)) {
-                        const runNo = gh.run_number || gh.run_id || '';
-                        if (gh.html_url) {
-                            html += `<div class="gh-line">> ▶️ GitHub Action: <a href="${escapeHtml(gh.html_url)}" target="_blank" rel="noopener" class="underline text-[#22D3EE]">run #${escapeHtml(String(runNo))}</a>${runStatus ? ` · <span class="gh-status">${escapeHtml(runStatus)}</span>` : ''}</div>`;
-                        } else {
-                            html += `<div class="gh-line">> ▶️ GitHub Action: run #${escapeHtml(String(runNo))}${runStatus ? ` · ${escapeHtml(runStatus)}` : ''}</div>`;
-                        }
-                    }
-                    const antri = shown.every(s => !s.status || s.status === 'queued');
+                const keysThisPoll = [];
+
+                const emit = (key, html) => {
+                    keysThisPoll.push(key);
+                    const el = logStream.dom[key];
+                    if (el) { el.innerHTML = html; return; }
+                    logStream.dom[key] = document.createElement('div');
+                    logStream.dom[key].innerHTML = html;
+                    logStream.pending.push(key);
+                };
+                const pushLog = (l, idx) => {
+                    const key = (l && (l.id || l.id === 0)) ? 'log:' + l.id : 'log:' + idx + ':' + ((l && l.ts) || 0) + ':' + toMsg(l);
+                    emit(key, `<div>> ${escapeHtml(toMsg(l))}</div>`);
+                };
+
+                pre.forEach((l, i) => pushLog(l, i));
+
+                // Status run di-refresh tiap poll (in_progress/completed/success).
+                if (splitIdx < 0 && (gh.html_url || gh.run_id)) {
+                    const runNo = gh.run_number || gh.run_id || '';
+                    const key = 'run:' + (gh.run_id || gh.html_url);
+                    const html = gh.html_url
+                        ? `<div class="gh-line">> ▶️ GitHub Action: <a href="${escapeHtml(gh.html_url)}" target="_blank" rel="noopener" class="underline text-[#22D3EE]">run #${escapeHtml(String(runNo))}</a>${runStatus ? ` · <span class="gh-status">${escapeHtml(runStatus)}</span>` : ''}</div>`
+                        : `<div class="gh-line">> ▶️ GitHub Action: run #${escapeHtml(String(runNo))}${runStatus ? ` · ${escapeHtml(runStatus)}` : ''}</div>`;
+                    emit(key, html);
+                }
+
+                if (stepsBase.length) {
+                    const antri = stepsBase.every(s => !s.status || s.status === 'queued');
                     if (antri && runStatus !== 'completed') {
-                        html += `<div class="gh-step" style="color:#F59E0B">>   ⏳ Job menunggu runner GitHub Actions... (live)</div>`;
+                        emit('wait:' + (gh.run_id || 'pending'), `<div class="gh-step" style="color:#F59E0B">>   ⏳ Job menunggu runner GitHub Actions... (live)</div>`);
                     }
                     const total = stepsBase.length;
-                    shown.forEach((s, i) => {
+                    stepsBase.forEach((s, i) => {
                         let mark = '⏳';
                         if (s.status === 'completed') {
                             mark = s.conclusion === 'success' ? '✅' : (['skipped', 'cancelled'].includes(s.conclusion) ? '⏭️' : '❌');
                         } else if (s.status === 'in_progress') { mark = '🔄'; }
-                        html += `<div class="gh-step">>   ${mark} [${i + 1}/${total}] ${escapeHtml(s.name || '')}${s.status === 'in_progress' ? ' — sedang berjalan...' : ''}</div>`;
+                        emit('step:' + i + ':' + (s.name || ''), `<div class="gh-step">>   ${mark} [${i + 1}/${total}] ${escapeHtml(s.name || '')}${s.status === 'in_progress' ? ' — sedang berjalan...' : ''}</div>`);
                     });
                 }
-                post.forEach(l => { html += `<div>> ${escapeHtml(toMsg(l))}</div>`; });
-                if (html) { logBox.innerHTML = html; logBox.scrollTop = logBox.scrollHeight; }
+
+                post.forEach((l, i) => pushLog(l, i));
+
+                // Prune elemen yang sudah tidak relevan (mis. baris "wait" hilang saat
+                // job mulai jalan / run line ter-inject tergantikan oleh log server).
+                const active = new Set(keysThisPoll);
+                logStream.pending = logStream.pending.filter(k => active.has(k) && logStream.dom[k]);
+                Object.keys(logStream.dom).forEach(k => {
+                    if (!active.has(k)) {
+                        const el = logStream.dom[k];
+                        if (el && el.parentNode) { el.parentNode.removeChild(el); }
+                        delete logStream.dom[k];
+                    }
+                });
+
+                const logBox = document.getElementById('logBox');
+                if (logBox) logBox.scrollTop = logBox.scrollHeight;
+                scheduleLogFlush();
             }
 
             function startPolling(taskId) {
                 clearInterval(pollTimer);
-                logRenderState.maxStepRevealed = 0;
+                resetLogStream();
                 const progressPanel = document.getElementById('progressPanel');
                 const tick = async () => {
                     try {
@@ -662,7 +712,7 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 clearInterval(pollTimer);
                 pollTimer = null;
                 isDownloading = false;
-                logRenderState.maxStepRevealed = 0;
+                resetLogStream();
 
                 // Reset murni: hanya hapus state (task + log + preview) di server.
                 // TIDAK ada fetch ke /api/download atau /api/download/confirm — jadi
