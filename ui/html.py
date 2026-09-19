@@ -455,8 +455,12 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                     logStream.pending.push(key);
                 };
                 const pushLog = (l, idx) => {
-                    const key = (l && (l.id || l.id === 0)) ? 'log:' + l.id : 'log:' + idx + ':' + ((l && l.ts) || 0) + ':' + toMsg(l);
-                    emit(key, `<div>> ${escapeHtml(toMsg(l))}</div>`);
+                    const msg = toMsg(l);
+                    // Hanya render log yang sudah sukses (✅). Baris dengan status
+                    // pending / jam pasir (⏳) atau sedang berjalan (🔄) di-skip.
+                    if (!/✅/.test(String(msg)) || /[⏳🔄]/.test(String(msg))) return;
+                    const key = (l && (l.id || l.id === 0)) ? 'log:' + l.id : 'log:' + idx + ':' + ((l && l.ts) || 0) + ':' + msg;
+                    emit(key, `<div>> ${escapeHtml(msg)}</div>`);
                 };
 
                 pre.forEach((l, i) => pushLog(l, i));
@@ -472,17 +476,17 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 }
 
                 if (stepsBase.length) {
-                    const antri = stepsBase.every(s => !s.status || s.status === 'queued');
-                    if (antri && runStatus !== 'completed') {
-                        emit('wait:' + (gh.run_id || 'pending'), `<div class="gh-step" style="color:#F59E0B">>   ⏳ Job menunggu runner GitHub Actions... (live)</div>`);
-                    }
-                    const total = stepsBase.length;
+                    // Hanya render step yang sudah sukses (✅). Step yang masih
+                    // pending (⏳) / sedang berjalan (🔄) TIDAK ditampilkan di awal,
+                    // hanya muncul begitu benar-benar selesai (status completed + success),
+                    // diurut sesuai urutan kemunculan workflow.
+                    const done = stepsBase.filter(s => s.status === 'completed' && s.conclusion === 'success');
+                    const total = done.length;
+                    let doneIdx = 0;
                     stepsBase.forEach((s, i) => {
-                        let mark = '⏳';
-                        if (s.status === 'completed') {
-                            mark = s.conclusion === 'success' ? '✅' : (['skipped', 'cancelled'].includes(s.conclusion) ? '⏭️' : '❌');
-                        } else if (s.status === 'in_progress') { mark = '🔄'; }
-                        emit('step:' + i + ':' + (s.name || ''), `<div class="gh-step">>   ${mark} [${i + 1}/${total}] ${escapeHtml(s.name || '')}${s.status === 'in_progress' ? ' — sedang berjalan...' : ''}</div>`);
+                        if (s.status !== 'completed' || s.conclusion !== 'success') return;
+                        emit('step:' + i + ':' + (s.name || ''), `<div class="gh-step">>   ✅ [${doneIdx + 1}/${total}] ${escapeHtml(s.name || '')}</div>`);
+                        doneIdx += 1;
                     });
                 }
 
