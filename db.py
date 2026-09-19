@@ -64,6 +64,18 @@ def get_logs(task_id:str,limit:int=200):
     with db() as conn:rows=conn.execute("SELECT level,message,created_at FROM task_logs WHERE task_id=%s ORDER BY id ASC LIMIT %s",(task_id,limit)).fetchall()
     return [{"level":r["level"],"message":r["message"],"created_at":_json(r["created_at"])} for r in rows]
 
+def delete_task(task_id:str):
+    """Hapus task + seluruh log/result-nya (task_logs ON DELETE CASCADE).
+    Dipakai hard reset UI dan untuk memulai ulang tugas dengan log bersih."""
+    with db() as conn:conn.execute("DELETE FROM tasks WHERE task_id=%s",(task_id,))
+
+def delete_tasks_by_session(session_token:str):
+    """Hapus semua task + log milik sebuah sesi. Kembalikan jumlah task terhapus."""
+    if not session_token:return 0
+    with db() as conn:
+        cur=conn.execute("DELETE FROM tasks WHERE session_token=%s RETURNING task_id",(session_token,))
+        return len(cur.fetchall())
+
 def get_task(task_id:str):
     with db() as conn:row=conn.execute("SELECT * FROM tasks WHERE task_id=%s",(task_id,)).fetchone()
     if not row:return None
@@ -178,6 +190,24 @@ def search_automations(q:str="",limit:int=50):
                        FROM search_logs
                        WHERE lower(video_id) LIKE ?
                        ORDER BY video_id ASC LIMIT ?""",(like,limit))
+        for r in cur.fetchall():
+            vid,title,actress,direktori,url,thumb=r
+            out.append({"name":vid,"code":vid,"id":vid,"title":title,"url":url,"thumb":thumb})
+        con.close()
+    except Exception:
+        out=[]
+    return out
+
+def random_automations(n:int=15):
+    """Kode video_id acak dari automation DB (search_logs) — dipakai suggestion on hover (dev)."""
+    n=max(1,int(n or 15))
+    out=[]
+    try:
+        con=_autodb();cur=con.cursor()
+        cur.execute("""SELECT video_id,title,actress,direktori,video_url,thumbnail
+                       FROM search_logs
+                       WHERE video_id IS NOT NULL AND video_id<>''
+                       ORDER BY RANDOM() LIMIT ?""",(n,))
         for r in cur.fetchall():
             vid,title,actress,direktori,url,thumb=r
             out.append({"name":vid,"code":vid,"id":vid,"title":title,"url":url,"thumb":thumb})

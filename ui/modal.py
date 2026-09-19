@@ -52,4 +52,25 @@ def get_modals_html():
             </div>
         </div>
     </div>
+<!-- Modal Reset Seluruh Progres -->
+    <div id="resetModal" class="hidden fixed inset-0 bg-black/90 backdrop-blur-sm z-[70] items-center justify-center p-4">
+        <div class="card bg-[#1E293B] border border-[#334155] w-full max-w-md p-6 rounded-xl shadow-2xl">
+            <h3 class="text-xl font-bold text-white mb-2 flex items-center gap-2">
+                <svg class="w-6 h-6 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                Reset Seluruh Progres?
+            </h3>
+            <p class="text-sm text-[#94A3B8] mb-5 leading-relaxed">Semua state frontend, <b class="text-gray-300">localStorage, sessionStorage</b>, dan <b class="text-gray-300">log di database</b> akan dihapus (tanpa memicu proses baru). UI akan kembali ke kondisi awal seperti baru membuka web.</p>
+            <div class="bg-[#0F172A] border border-[#334155] rounded-lg p-3 mb-5 text-[11px] text-[#94A3B8] font-mono space-y-1">
+                <div><span class="text-red-400">✕</span> runId / preview lama dihapus</div>
+                <div><span class="text-red-400">✕</span> log & terminal dibersihkan</div>
+                <div><span class="text-red-400">✕</span> tidak memicu /dispatch</div>
+            </div>
+            <div class="flex justify-end gap-3 mt-4">
+                <button id="cancelResetBtn" class="px-5 py-2.5 text-sm font-semibold text-[#E2E8F0] bg-[#334155] hover:bg-[#475569] rounded-xl transition">Batal</button>
+                <button id="confirmResetBtn" class="px-5 py-2.5 text-sm font-bold text-white bg-red-600 hover:bg-red-700 rounded-xl transition shadow-lg shadow-red-900/40 flex items-center gap-2">
+                    <span>Ya, Reset</span>
+                </button>
+            </div>
+        </div>
+    </div>
     """

@@ -23,12 +23,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db import (init_db, create_task, update_task, patch_task_meta, add_log, get_task, upsert_session,
     get_session_email, upsert_history, list_history, delete_history, clear_history,
     find_history_duplicate, list_automations, upsert_automation, due_automations,
-    mark_automation_run, db_check, search_automations, autodb_status)
+    mark_automation_run, db_check, search_automations, random_automations, autodb_status,
+    delete_task, delete_tasks_by_session)
 from ui.html import get_full_ui
 from ui.modal import get_modals_html
 
 app=FastAPI(title="Remote Uploader",docs_url=None,redoc_url=None)
+DEV_MODE=bool(int((os.environ.get("DEV") or "0").strip() or "0"))
 APP_VERSION="1.4.0 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
+if DEV_MODE:APP_VERSION+=" · DEV (suggestion hover aktif)"
 
 GDRIVE_SCOPE="https://www.googleapis.com/auth/drive.file"
 GH_TOKEN=os.environ.get("GH_TOKEN","");GH_REPO=os.environ.get("GH_REPO","");GH_BRANCH=os.environ.get("GH_BRANCH","main")
@@ -263,6 +266,14 @@ def api_automation_search(q:str=""):
     q=(q or "").strip()
     return {"ok":True,"query":q,"results":search_automations(q)}
 
+@app.get("/api/automation/random")
+def api_automation_random(n:int=15):
+    """Kode video_id acak dari pool database — dipakai suggestion on hover (dev).
+    Jumlah di-random oleh UI (10–20); endpoint membatasi maks 50."""
+    _db_ready()
+    n=max(1,min(50,int(n or 15)))
+    return {"ok":True,"results":random_automations(n)}
+
 @app.get("/api/auth/status")
 def api_auth_status(session_token:str=""):
     if not session_token:return {"connected":False}
@@ -322,14 +333,20 @@ def process_download(req:DownloadRequest):
     if raw.startswith(("http://","https://")):raise HTTPException(status_code=400,detail="Masukkan kode pencarian, bukan URL!")
     if not req.session_token:
         raise HTTPException(status_code=401,detail="Harus login Google Drive dulu sebelum unduh")
-    _db_ready();email=get_session_email(req.session_token) if req.session_token else "";dupe=find_history_duplicate(raw,email) if email else None
-    if dupe:
-        create_task(raw,raw,req.session_token,{"clean_title":dupe.get("name",raw),"status_text":"Sudah ada di riwayat, unduhan dilewati."});update_task(raw,status="Selesai",progress=100,message="Sudah ada di riwayat",completed_at=datetime.now(timezone.utc));add_log(raw,f"✅ [DUPLIKAT] '{dupe.get('name',raw)}' sudah ada. Melewati unduhan.");return {"status":"started","task_id":raw,"skipped":"duplicate"}
+    _db_ready();email=get_session_email(req.session_token) if req.session_token else ""
     # Hanya skip dispatch jika worker BENAR-BENAR sedang jalan (bukan queued yang bisa stuck)
     existing=get_task(raw)
     active_statuses=("Memproses","Mengunduh","Mengunggah","Memproses pencarian...")
     if existing and existing.get("status") in active_statuses:
         return {"status":"started","task_id":raw,"skipped":"already_running","current_status":existing.get("status")}
+    # Log bersih: kalau kode sudah pernah diproses sebelumnya, hapus task + log + result
+    # lamanya dulu supaya tidak menumpuk (mis. 'Menerima input: X' berkali-kali).
+    # Progress baru dimulai murni dari 0% tanpa runId/preview lama.
+    if existing:
+        delete_task(raw)
+    dupe=find_history_duplicate(raw,email) if email else None
+    if dupe:
+        create_task(raw,raw,req.session_token,{"clean_title":dupe.get("name",raw),"status_text":"Sudah ada di riwayat, unduhan dilewati."});update_task(raw,status="Selesai",progress=100,message="Sudah ada di riwayat",completed_at=datetime.now(timezone.utc));add_log(raw,f"✅ [DUPLIKAT] '{dupe.get('name',raw)}' sudah ada. Melewati unduhan.");return {"status":"started","task_id":raw,"skipped":"duplicate"}
     # Selalu buat/update task + dispatch ulang (queued/gagal/selesai lama → coba lagi)
     # Mode awal: PREVIEW (cari + metadata) dulu, unduh penuh HANYA setelah user konfirmasi.
     create_task(raw,raw,req.session_token,{"clean_title":"","status_text":"Menunggu worker GitHub Actions...","created":wib_time(),"mode":"preview","confirmed":False})
@@ -349,6 +366,27 @@ def process_download(req:DownloadRequest):
 
 class ConfirmRequest(BaseModel):
     task_id:str;session_token:str=""
+
+class ResetRequest(BaseModel):
+    task_id:str="";session_token:str=""
+
+@app.post("/api/reset")
+def hard_reset(req:ResetRequest):
+    """Hard reset (dipanggil oleh tombol Reset di UI setelah konfirmasi).
+
+    Hanya menghapus state di database (task + seluruh log/result preview lama).
+    TIDAK memicu /dispatch atau proses scraping apa pun — worker tidak disentuh.
+    Frontend wajib membersihkan state lokal (localStorage/sessionStorage) sendiri.
+    """
+    _db_ready()
+    tid=(req.task_id or "").strip()
+    if tid:
+        delete_task(tid)
+        return {"ok":True,"cleared":"task","task_id":tid}
+    if req.session_token:
+        n=delete_tasks_by_session(req.session_token)
+        return {"ok":True,"cleared":"session","session_token":req.session_token,"cleared_count":n}
+    return {"ok":True,"cleared":None}
 
 @app.post("/api/download/confirm")
 def confirm_download(req:ConfirmRequest):
@@ -467,7 +505,7 @@ def automation_run(request:Request):
 
 @app.get("/api",response_class=HTMLResponse,include_in_schema=False)
 @app.get("/api/",response_class=HTMLResponse,include_in_schema=False)
-def serve_api_ui():return HTMLResponse(content=get_full_ui(APP_VERSION,get_modals_html()))
+def serve_api_ui():return HTMLResponse(content=get_full_ui(APP_VERSION,get_modals_html(),DEV_MODE))
 
 @app.get("/",response_class=HTMLResponse,include_in_schema=False)
-def serve_ui():return HTMLResponse(content=get_full_ui(APP_VERSION,get_modals_html()))
+def serve_ui():return HTMLResponse(content=get_full_ui(APP_VERSION,get_modals_html(),DEV_MODE))

@@ -1,4 +1,4 @@
-def get_full_ui(app_version, modals_html):
+def get_full_ui(app_version, modals_html, is_dev=False):
     """Mengembalikan HTML lengkap untuk aplikasi."""
     template = r"""
     <!DOCTYPE html>
@@ -225,6 +225,7 @@ def get_full_ui(app_version, modals_html):
             </div>
 
         <script>
+            const IS_DEV = __IS_DEV__;
             let sessionToken = localStorage.getItem('driveSessionToken') || '';
             let pollTimer = null;
             let fileToDelete = null;
@@ -313,9 +314,56 @@ def get_full_ui(app_version, modals_html):
                 }, 350);
             });
             autoList.addEventListener('click', (e) => {
+                const rnd = e.target.closest('[data-random-code]');
+                if (rnd) {
+                    urlInput.value = rnd.dataset.randomCode;
+                    autoContainer.classList.add('hidden');
+                    const form = document.getElementById('uploadForm');
+                    if (form && typeof form.requestSubmit === 'function') { form.requestSubmit(); }
+                    else { form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true })); }
+                    return;
+                }
                 const btn = e.target.closest('[data-auto-code]');
                 if (btn) { urlInput.value = btn.dataset.autoCode; autoContainer.classList.add('hidden'); urlInput.focus(); }
             });
+
+            // ===== RANDOM SUGGESTION ON HOVER (HANYA VERSI DEV) =====
+            let hoverSuggestionTimer = null;
+            function loadRandomSuggestions() {
+                if (!IS_DEV) return;
+                if (urlInput.value.trim()) return;
+                const n = 10 + Math.floor(Math.random() * 11); // 10-20
+                fetch('/api/automation/random?n=' + n)
+                    .then(res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
+                    .then(data => {
+                        if (urlInput.value.trim()) return;
+                        const results = data.results || [];
+                        if (!results.length) { autoContainer.classList.add('hidden'); return; }
+                        autoList.innerHTML = results.map(r => {
+                            const code = (r.code || r.id || r.name || '').trim();
+                            const title = r.title || '';
+                            const thumb = r.thumb || '';
+                            const safeCode = escapeHtml(code);
+                            const safeTitle = escapeHtml(title);
+                            const thumbHtml = thumb ? `<img src="${escapeHtml(thumb)}" class="w-9 h-9 rounded-md object-cover border border-[#334155] shrink-0" onerror="this.style.display='none'">` : `<div class="w-9 h-9 rounded-md bg-[#334155] flex items-center justify-center text-sm shrink-0">🎬</div>`;
+                            return `<button type="button" data-random-code="${safeCode}" class="text-left w-full px-3 py-2 rounded-lg bg-[#0F172A] border border-[#334155] hover:border-[#14B8A6] hover:bg-[#1a2742] text-sm text-[#E2E8F0] transition flex items-center gap-3">${thumbHtml}<span class="min-w-0"><span class="block font-mono font-bold text-[#14B8A6]">${safeCode}</span>${safeTitle ? `<span class="block text-xs text-[#94A3B8] truncate">${safeTitle}</span>` : ''}<span class="block text-[10px] font-bold text-amber-400/90 mt-0.5">⚡ Saran acak (dev) — klik untuk cari langsung</span></span></button>`;
+                        }).join('');
+                        autoContainer.classList.remove('hidden');
+                        autoList.scrollTop = 0;
+                    })
+                    .catch(e => console.error('[API Error] Gagal memuat saran acak:', e));
+            }
+            urlInput.addEventListener('mouseenter', () => {
+                if (!IS_DEV) return;
+                clearTimeout(hoverSuggestionTimer);
+                hoverSuggestionTimer = setTimeout(loadRandomSuggestions, 450);
+            });
+            urlInput.addEventListener('mouseleave', () => {
+                clearTimeout(hoverSuggestionTimer);
+                setTimeout(() => { if (!autoContainer.matches(':hover')) { autoContainer.classList.add('hidden'); } }, 250);
+            });
+            autoContainer.addEventListener('mouseenter', () => clearTimeout(hoverSuggestionTimer));
+            autoContainer.addEventListener('mouseleave', () => autoContainer.classList.add('hidden'));
 
             // ===== FLOW PREVIEW → KONFIRMASI → DOWNLOAD =====
             function showPreview(d) {
@@ -542,13 +590,41 @@ def get_full_ui(app_version, modals_html):
                 }
             });
             
-            // ===== RESET: bersihkan progress UI & mulakan tugas baru =====
+            // ===== RESET: dialog konfirmasi → HARD RESET murni =====
+            function openResetModal() {
+                const m = document.getElementById('resetModal');
+                if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+            }
+            function closeResetModal() {
+                const m = document.getElementById('resetModal');
+                if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+            }
+
             function resetTask() {
+                openResetModal();
+            }
+
+            async function performHardReset() {
                 clearInterval(pollTimer);
                 pollTimer = null;
                 isDownloading = false;
+
+                // Hapus task/log/result lama di server (TANPA dispatch / memproses).
+                try {
+                    await fetch('/api/reset', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ task_id: currentTaskId, session_token: sessionToken })
+                    });
+                } catch (err) { console.error('[API Error] Gagal reset state server:', err); }
+
                 currentTaskId = '';
-                try { localStorage.removeItem(PTASK_KEY); } catch (e) {}
+                // Hapus SEMUA state frontend: localStorage + sessionStorage.
+                try { localStorage.clear(); } catch (e) {}
+                try { sessionStorage.clear(); } catch (e) {}
+                sessionToken = '';
+                updateDriveUI(false);
+                document.getElementById('authPopover').classList.add('hidden');
 
                 const progressPanel = document.getElementById('progressPanel');
                 progressPanel.className = "mt-6 bg-[#1E293B] border border-[#334155] rounded-xl overflow-hidden shadow-xl";
@@ -577,9 +653,14 @@ def get_full_ui(app_version, modals_html):
                 if (errorMsg) errorMsg.classList.add('hidden');
                 const autoContainer = document.getElementById('autoSuggestContainer');
                 if (autoContainer) autoContainer.classList.add('hidden');
+
+                closeResetModal();
             }
 
             document.getElementById('resetBtn').addEventListener('click', resetTask);
+            document.getElementById('confirmResetBtn').addEventListener('click', performHardReset);
+            document.getElementById('cancelResetBtn').addEventListener('click', closeResetModal);
+            document.getElementById('resetModal').addEventListener('click', (e) => { if (e.target.id === 'resetModal') closeResetModal(); });
             
             // 🟢 LOAD HISTORY DENGAN TOMBOL VIEW (STREAMING MANUAL KE DRIVE) DI BAWAH TOMBOL DELETE
             async function loadHistory() {
@@ -978,4 +1059,5 @@ def get_full_ui(app_version, modals_html):
     """
     template = template.replace("__APP_VERSION__", app_version)
     template = template.replace("__MODALS_INJECTION__", modals_html)
+    template = template.replace("__IS_DEV__", "true" if is_dev else "false")
     return template
