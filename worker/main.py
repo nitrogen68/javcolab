@@ -4,6 +4,7 @@
 # lalu melaporkan progres & hasil kembali ke state (Vercel/GitHub).
 import asyncio
 import base64
+import json
 import os
 import re
 import subprocess
@@ -172,6 +173,119 @@ def dood_file_info(file_code):
     res = j.get("result", [])
     rows = res if isinstance(res, list) else ([res] if res else [])
     return rows[0] if rows else {}
+
+
+def dood_remote_upload(url, title=""):
+    """DoodStream menarik URL CDN via API upload/url. Mengembalikan (filecode, msg, raw)."""
+    if not DOOD_API_KEY:
+        raise RuntimeError("DOOD_API_KEY belum diset (GitHub Actions secret)")
+    r = requests.get(f"{DOOD_API_BASE}/upload/url", params={"key": DOOD_API_KEY, "url": url, "new_title": (title or "")[:200]}, timeout=30)
+    raw = r.json()
+    res = raw.get("result")
+    fc = ""
+    if isinstance(res, dict):
+        fc = str(res.get("filecode") or "")
+    elif isinstance(res, list):
+        if res and isinstance(res[0], dict):
+            fc = str(res[0].get("filecode") or "")
+    return fc, str(raw.get("msg") or ""), raw
+
+
+def dood_upload_status(file_code):
+    """Status remote upload DoodStream. Mengembalikan baris transfer terpisah yang cocok."""
+    raw = requests.get(f"{DOOD_API_BASE}/urlupload/status", params={"key": DOOD_API_KEY, "file_code": file_code}, timeout=30).json()
+    rows = raw.get("result", [])
+    rows = rows if isinstance(rows, list) else ([rows] if rows else [])
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("file_code") or row.get("filecode") or "") == str(file_code):
+            return row
+    return rows[0] if rows else {}
+
+
+def dood_search_files(title):
+    """Cari file di akun DoodStream berdasarkan judul (kasus remote sudah ada/gagal)."""
+    q = re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()
+    if not q:
+        return {}
+    raw = requests.get(f"{DOOD_API_BASE}/file/search", params={"key": DOOD_API_KEY, "fld_id": "0", "search": q[:60]}, timeout=30).json()
+    rows = raw.get("result", [])
+    rows = rows if isinstance(rows, list) else ([rows] if rows else [])
+    for row in rows:
+        if isinstance(row, dict):
+            ft = re.sub(r"[^a-z0-9]+", " ", str(row.get("title") or "").lower())
+            if q[:12] and (q[:12] in ft or ft[:12] in q):
+                return row
+    return {}
+
+
+def _dood_finalize(file_code, title, session_token, fname, size_from=""):
+    """Rekam hasil sukses DoodStream: ambil info (download_url) → report Selesai + riwayat."""
+    try:
+        info = dood_file_info(file_code)
+    except Exception:
+        info = {}
+    url = info.get("download_url") or f"https://doodstream.com/d/{file_code}"
+    size = size_from or str(info.get("size") or "")
+    hist = {
+        "session_token": session_token,
+        "email": "",
+        "name": fname,
+        "size": size,
+        "time": wib(),
+        "status": "success",
+        "path": "",
+        "drive_file_id": "",
+        "dood_url": url,
+        "thumb": "",
+    }
+    report({"status": "Selesai", "percent": 100, "downloaded": 0, "total": 0, "speed": 0,
+            "clean_title": title, "status_text": "Berhasil disimpan ke DoodStream (via API).",
+            "dood_url": url, "dood_filecode": file_code}, hist, force=True)
+    log(f"🎬 Selesai! File tersedia di DoodStream: {url}")
+
+
+def run_dood_destination(cdn, page_url, title, session_token):
+    """Tujuan 'dood': kirim URL CDN ke DoodStream via API upload/url; jika pull remote
+    gagal/lewat waktu → fallback upload lokal dari runner (garansi tombol selalu berfungsi)."""
+    fname = clean_filename(title, page_url)
+    log("🎬 Tujuan 'dood': mengirim URL CDN ke DoodStream via API (upload/url)...")
+    try:
+        fc, msg, raw = dood_remote_upload(cdn, title)
+        log(f"[dood] respon upload/url -> {json.dumps(raw)[:400] or msg[:400]}")
+    except Exception as e:
+        fc = ""
+        log(f"[dood] upload/url error: {str(e)[:200]}")
+    if fc:
+        log(f"🎬 DoodStream menerima URL CDN (filecode {fc}). Menunggu remote pull selesai...")
+        deadline = time.time() + 2400  # 40 menit maks
+        while time.time() < deadline:
+            st = dood_upload_status(fc)
+            raw_s = str(st.get("status") or "").lower()
+            bd = int(st.get("bytes_downloaded") or 0)
+            bt = int(st.get("bytes_total") or 0)
+            done = raw_s in ("completed", "complete", "done", "success", "10", "100") or (bt > 0 and bd >= bt)
+            if done:
+                _dood_finalize(fc, title, session_token, fname)
+                return
+            if raw_s in ("error", "failure", "failed", "canceled", "cancelled"):
+                log(f"[dood] remote pull status error: {json.dumps(st)[:200]}")
+                break
+            if bt > 0:
+                pct = 10 + (85 * bd // bt)
+                pct = min(pct, 99)
+                report({"status": "Mengunggah ke DoodStream (via API)...", "percent": pct, "clean_title": title,
+                        "status_text": f"DoodStream menarik CDN: {bd // 1024 // 1024} MB / {bt // 1024 // 1024} MB"}, force=True)
+                log(f"DoodStream menarik CDN: {bd // 1024 // 1024} / {bt // 1024 // 1024} MB")
+            time.sleep(8)
+        log("⚠️ Remote pull gagal/lewat batas waktu → fallback upload lokal dari runner.")
+    else:
+        existing = dood_search_files(title)
+        if existing and existing.get("filecode"):
+            log("🎬 File sudah ada di akun DoodStream — memakai link yang sudah tersedia.")
+            _dood_finalize(str(existing["filecode"]), title, session_token, fname, size_from=str(existing.get("size") or ""))
+            return
+        log("⚠️ Remote upload tidak menghasilkan filecode → fallback upload lokal dari runner.")
+    run_dood_upload(cdn, page_url, title, session_token, start_pct=15)
 
 
 def run_dood_upload(cdn, page_url, title, session_token, start_pct=20):
@@ -874,7 +988,7 @@ def run():
         after_confirmed = get_task()
         dest = str((after_confirmed.get("meta") or {}).get("destination") or "").lower()
         if dest == "dood":
-            run_dood_upload(cdn, page_url, title, session_token, start_pct=20)
+            run_dood_destination(cdn, page_url, title, session_token)
             return
         if dest == "direct":
             log("📥 Tujuan 'direct': link CDN dikirim ke browser — worker selesai.")

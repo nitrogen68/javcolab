@@ -503,8 +503,8 @@ def confirm_download(req:ConfirmRequest):
         if not cdn:
             raise HTTPException(status_code=400,detail="Link CDN belum tersedia — jalankan mode Google Drive dulu atau ulangi pencarian")
         patch_task_meta(tid,meta)
-        add_log(tid,"🎬 Doodstream (via API): worker mengunduh penuh lalu upload lokal ke DoodStream.")
-        update_task(tid,meta=meta,session_token=req.session_token,status="Mengunggah ke DoodStream (via API)...",message="Worker mengunduh file lalu upload ke akun DoodStream Anda...",progress=15)
+        add_log(tid,"🎬 Doodstream (via API): worker mengirim URL CDN ke DoodStream via upload/url (fallback: upload lokal dari runner).")
+        update_task(tid,meta=meta,session_token=req.session_token,status="Mengunggah ke DoodStream (via API)...",message="Mengunggah ke akun DoodStream Anda...",progress=15)
         return {"status":"confirmed","task_id":tid,"confirmed":True,"destination":"dood"}
     if dest=="direct":
         cdn=meta.get("cdn","")
@@ -559,6 +559,7 @@ def get_progress(task_id:str):
     out["direct_url"]=meta.get("direct_url","")
     out["drive_file_id"]=meta.get("drive_file_id","")
     out["dood_url"]=meta.get("dood_url","")
+    out["dood"]=meta.get("dood") or {}
     github=dict(meta.get("github") or {})
     # LAZY RUN RESOLUTION: right setelah workflow_dispatch HTTP 204, GitHub belum
     # mencatat run-nya sehingga resolve di _launch_task sering gagal. Di sini run

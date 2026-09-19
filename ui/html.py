@@ -109,21 +109,21 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                                 <div id="previewThumbPlaceholder" class="w-full h-full flex items-center justify-center text-3xl">🎬</div>
                             </div>
                             <div class="flex-1 min-w-0 w-full">
-                                <p class="text-[10px] font-bold text-[#14B8A6] uppercase tracking-widest mb-1">Preview siap — konfirmasi untuk unduh penuh</p>
+                                <p class="text-[10px] font-bold text-[#14B8A6] uppercase tracking-widest mb-1">Preview siap — pilih tujuan unduhan</p>
                                 <h3 id="previewTitle" class="text-sm sm:text-base font-bold text-white mb-2 leading-snug">-</h3>
                                 <div class="flex flex-wrap gap-2 text-[11px]">
                                     <span id="previewSize" class="px-2 py-1 bg-[#0F172A] text-[#94A3B8] rounded-lg border border-[#334155] font-mono">Ukuran: -</span>
                                     <span id="previewDur" class="px-2 py-1 bg-[#0F172A] text-[#94A3B8] rounded-lg border border-[#334155] font-mono">Durasi: -</span>
                                     <span id="previewFname" class="px-2 py-1 bg-[#0F172A] text-[#94A3B8] rounded-lg border border-[#334155] font-mono truncate max-w-full">File: -</span>
                                 </div>
-                                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-4 items-stretch">
-                                    <button id="confirmDownloadBtn" class="px-2 py-3 min-w-0 text-center leading-tight bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 text-white font-bold rounded-xl shadow-lg shadow-emerald-900/30">⬇️ Unduh ke Google Drive</button>
-                                    <button id="doodDownloadBtn" class="px-2 py-3 min-w-0 text-center leading-tight bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-700 hover:to-amber-600 text-white font-bold rounded-xl shadow-lg shadow-orange-900/30">🎬 Doodstream (via API)</button>
-                                    <button id="directDownloadBtn" class="px-2 py-3 min-w-0 text-center leading-tight bg-gradient-to-r from-sky-600 to-cyan-500 hover:from-sky-700 hover:to-cyan-600 text-white font-bold rounded-xl shadow-lg shadow-sky-900/30">📥 Unduh Langsung (offline)</button>
-                                </div>
-                                <button id="resetBtn" class="mt-2 w-full sm:w-auto px-6 h-11 bg-gradient-to-r from-red-600 to-orange-500 hover:from-red-700 hover:to-orange-600 text-white font-bold rounded-xl shadow-lg shadow-red-900/30">🔄 Reset & Mulai Tugas Baru</button>
                             </div>
                         </div>
+                        <div class="grid grid-cols-1 min-[480px]:grid-cols-3 gap-2 mt-3 items-stretch">
+                            <button id="confirmDownloadBtn" class="px-2 py-3 min-w-0 text-center leading-tight bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 text-white font-bold rounded-xl shadow-lg shadow-emerald-900/30">⬇️ Unduh ke Google Drive</button>
+                            <button id="doodDownloadBtn" class="px-2 py-3 min-w-0 text-center leading-tight bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-700 hover:to-amber-600 text-white font-bold rounded-xl shadow-lg shadow-orange-900/30">🎬 Doodstream (via API)</button>
+                            <button id="directDownloadBtn" class="px-2 py-3 min-w-0 text-center leading-tight bg-gradient-to-r from-sky-600 to-cyan-500 hover:from-sky-700 hover:to-cyan-600 text-white font-bold rounded-xl shadow-lg shadow-sky-900/30">📥 Unduh Langsung (offline)</button>
+                        </div>
+                        <button id="resetBtn" class="mt-2 w-full sm:w-auto px-6 h-11 bg-gradient-to-r from-red-600 to-orange-500 hover:from-red-700 hover:to-orange-600 text-white font-bold rounded-xl shadow-lg shadow-red-900/30">🔄 Reset & Mulai Tugas Baru</button>
                     </div>
                 </div>
                 
