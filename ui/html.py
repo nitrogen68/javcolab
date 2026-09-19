@@ -1,4 +1,4 @@
-def get_full_ui(app_version, modals_html):
+def get_full_ui(app_version, modals_html, is_dev=False):
     """Mengembalikan HTML lengkap untuk aplikasi."""
     template = r"""
     <!DOCTYPE html>
@@ -24,13 +24,11 @@ def get_full_ui(app_version, modals_html):
             .chk-custom { accent-color: #ef4444; }
             .scrollbar-thin::-webkit-scrollbar { height: 4px; }
             .scrollbar-thin::-webkit-scrollbar-thumb { background: #4B5563; border-radius: 4px; }
-            .suggest-chip {
-                background: #1E293B; border: 1px solid #334155; border-radius: 8px;
-                padding: 6px 14px; white-space: nowrap; cursor: pointer;
-                color: #E2E8F0; font-size: 0.8rem; transition: background 0.2s;
-            }
-            .suggest-chip:hover { background: #2563EB; border-color: #2563EB; }
             #driveIconSvg:hover { color: #4285F4; }
+            .gh-line { color: #22D3EE; font-weight: 600; }
+            .gh-line a { text-decoration: underline; }
+            .gh-step { color: #67E8F9; opacity: 0.85; }
+            .gh-status { color: #FBBF24; text-transform: capitalize; }
 
             .progress-bar.uploading {
                 background: linear-gradient(90deg, #f59e0b, #fbbf24);
@@ -57,7 +55,6 @@ def get_full_ui(app_version, modals_html):
             <div class="flex gap-6 border-b border-[#334155] mb-6">
                 <button data-tab="upload" class="tab-btn active pb-3 font-semibold text-sm tracking-wide">Upload Baru</button>
                 <button data-tab="history" class="tab-btn pb-3 font-semibold text-sm tracking-wide">Riwayat Unduhan</button>
-                <button data-tab="automation" class="tab-btn pb-3 font-semibold text-sm tracking-wide">Automation</button>
             </div>
             
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -69,8 +66,9 @@ def get_full_ui(app_version, modals_html):
                                 <input type="text" id="urlInput" required placeholder="Contoh: vema 263" autocomplete="off" class="flex-1 min-w-0 h-12 px-4 rounded-xl outline-none text-sm border focus:border-blue-500 transition-all bg-[#0A0F1C]">
                                 <button type="button" data-paste="urlInput" class="shrink-0 px-4 sm:px-5 h-12 bg-[#334155] hover:bg-[#475569] border border-[#334155] rounded-xl text-sm font-semibold text-[#E2E8F0]">Paste</button>
                             </div>
-                            <div id="randomSuggestContainer" class="mt-2 hidden">
-                                <div id="randomSuggestScroll" class="flex gap-2 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-800"></div>
+                            <div id="autoSuggestContainer" class="mt-2 hidden">
+                                <p class="text-[10px] font-bold text-[#14B8A6] uppercase tracking-widest mb-1.5 flex items-center gap-1.5"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 1.1.9 2 2 2h12a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H6a2 2 0 00-2 2z"/></svg> Dari database Automation</p>
+                                <div id="autoSuggestList" class="flex flex-col gap-1.5 max-h-56 overflow-y-auto pr-1"></div>
                             </div>
                         </div>
                         <div id="errorMsg" class="hidden text-xs text-red-400 bg-red-950/40 p-3 rounded-lg border border-red-900">❌ Error: Masukan kode pencarian, bukan URL!</div>
@@ -119,6 +117,7 @@ def get_full_ui(app_version, modals_html):
                                     <span id="previewFname" class="px-2 py-1 bg-[#0F172A] text-[#94A3B8] rounded-lg border border-[#334155] font-mono truncate max-w-full">File: -</span>
                                 </div>
                                 <button id="confirmDownloadBtn" class="mt-4 w-full sm:w-auto px-6 h-12 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 text-white font-bold rounded-xl shadow-lg shadow-emerald-900/30">⬇️ Unduh ke Google Drive</button>
+                                <button id="resetBtn" class="mt-2 w-full sm:w-auto px-6 h-11 bg-gradient-to-r from-red-600 to-orange-500 hover:from-red-700 hover:to-orange-600 text-white font-bold rounded-xl shadow-lg shadow-red-900/30">🔄 Reset & Mulai Tugas Baru</button>
                             </div>
                         </div>
                     </div>
@@ -138,19 +137,6 @@ def get_full_ui(app_version, modals_html):
                 </div>
             </div>
             
-            <div id="automationPanel" class="card p-4 sm:p-6 mt-6 hidden">
-                <div class="flex justify-between items-center mb-5">
-                    <h2 class="font-bold text-white text-lg tracking-tight">🤖 Automation</h2>
-                    <button onclick="loadAutomations()" class="text-xs font-semibold bg-[#334155] hover:bg-[#475569] text-white px-4 py-2 rounded-lg border border-[#475569] transition">🔄 Refresh</button>
-                </div>
-                <div id="automationList" class="space-y-3">
-                    <div class="flex flex-col items-center justify-center h-40 text-center">
-                        <span class="text-4xl mb-2 opacity-50">🤖</span>
-                        <p class="text-[#64748B] text-sm">Memuat automation...</p>
-                    </div>
-                </div>
-            </div>
-
             <div id="driveStatusContainer" class="mt-6 flex flex-col md:flex-row items-center justify-center bg-[#1E293B] border border-[#334155] rounded-xl p-5 gap-4 md:gap-8 relative overflow-visible">
                 <div class="flex flex-col items-center justify-center min-w-0 text-center">
                     <svg id="driveIconSvg" class="w-10 h-10 text-gray-400 cursor-pointer transition hover:scale-110 mb-2 drop-shadow-md" fill="currentColor" viewBox="0 0 24 24" onclick="toggleDriveStatus()">
@@ -239,11 +225,13 @@ def get_full_ui(app_version, modals_html):
             </div>
 
         <script>
+            const IS_DEV = __IS_DEV__;
             let sessionToken = localStorage.getItem('driveSessionToken') || '';
             let pollTimer = null;
             let fileToDelete = null;
             let isDownloading = false;
             let currentTaskId = '';
+            const PTASK_KEY = 'ptask';
 
             const driveIconSvg = document.getElementById('driveIconSvg');
             const driveEmail = document.getElementById('driveEmail');
@@ -278,7 +266,6 @@ def get_full_ui(app_version, modals_html):
                 document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
                 document.getElementById('uploadPanel').classList.toggle('hidden', t !== 'upload');
                 document.getElementById('historyPanel').classList.toggle('hidden', t !== 'history');
-                document.getElementById('automationPanel').classList.toggle('hidden', t !== 'automation');
                 
                 const driveContainer = document.getElementById('driveStatusContainer');
                 if (driveContainer) {
@@ -286,7 +273,6 @@ def get_full_ui(app_version, modals_html):
                 }
 
                 if (t === 'history') loadHistory();
-                if (t === 'automation') loadAutomations();
             }
 
             function formatBytes(b) {
@@ -297,32 +283,87 @@ def get_full_ui(app_version, modals_html):
             }
 
             const urlInput = document.getElementById('urlInput');
-            const randomContainer = document.getElementById('randomSuggestContainer');
-            const randomScroll = document.getElementById('randomSuggestScroll');
-            
-            async function loadRandomSuggest() {
-                try {
-                    const res = await fetch('/api/saran_random');
-                    if (!res.ok) throw new Error(`HTTP Error ${res.status}: ${await res.text()}`);
-                    const data = await res.json();
-                    if (data.length > 0) {
-                        randomScroll.innerHTML = data.map(k => `<span class="suggest-chip" data-kode="${escapeHtml(k)}">${escapeHtml(k)}</span>`).join('');
-                        randomContainer.classList.remove('hidden');
-                    } else { randomContainer.classList.add('hidden'); }
-                } catch (e) { 
-                    console.error('[API Error] Gagal memuat saran acak:', e); 
-                    randomContainer.classList.add('hidden');
-                }
-            }
 
-            urlInput.addEventListener('mouseenter', loadRandomSuggest);
-            urlInput.addEventListener('focus', loadRandomSuggest);
-            randomContainer.addEventListener('mouseleave', () => randomContainer.classList.add('hidden'));
-            urlInput.addEventListener('mouseleave', (e) => { if (!randomContainer.contains(e.relatedTarget)) randomContainer.classList.add('hidden'); });
-            randomScroll.addEventListener('click', (e) => {
-                const chip = e.target.closest('.suggest-chip');
-                if (chip) { urlInput.value = chip.dataset.kode; randomContainer.classList.add('hidden'); urlInput.focus(); }
+            // ===== AUTOMATION DATABASE AUTOCOMPLETE =====
+            const autoContainer = document.getElementById('autoSuggestContainer');
+            const autoList = document.getElementById('autoSuggestList');
+            let autoTimer = null;
+            urlInput.addEventListener('input', () => {
+                const q = urlInput.value.trim();
+                clearTimeout(autoTimer);
+                if (q.length < 2) { autoContainer.classList.add('hidden'); autoList.innerHTML = ''; return; }
+                autoTimer = setTimeout(async () => {
+                    try {
+                        const res = await fetch('/api/automation/search?q=' + encodeURIComponent(q));
+                        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                        const data = await res.json();
+                        const results = data.results || [];
+                        if (results.length > 0) {
+                            autoList.innerHTML = results.map(r => {
+                                const code = (r.code || r.id || r.name || '').trim();
+                                const title = r.title || '';
+                                const thumb = r.thumb || '';
+                                const safeCode = escapeHtml(code);
+                                const safeTitle = escapeHtml(title);
+                                const thumbHtml = thumb ? `<img src="${escapeHtml(thumb)}" class="w-9 h-9 rounded-md object-cover border border-[#334155] shrink-0" onerror="this.style.display='none'">` : `<div class="w-9 h-9 rounded-md bg-[#334155] flex items-center justify-center text-sm shrink-0">🎬</div>`;
+                                return `<button type="button" data-auto-code="${safeCode}" class="text-left w-full px-3 py-2 rounded-lg bg-[#0F172A] border border-[#334155] hover:border-[#14B8A6] hover:bg-[#1a2742] text-sm text-[#E2E8F0] transition flex items-center gap-3">${thumbHtml}<span class="min-w-0"><span class="block font-mono font-bold text-[#14B8A6]">${safeCode}</span>${safeTitle ? `<span class="block text-xs text-[#94A3B8] truncate">${safeTitle}</span>` : ''}</span></button>`;
+                            }).join('');
+                            autoContainer.classList.remove('hidden');
+                        } else { autoContainer.classList.add('hidden'); autoList.innerHTML = ''; }
+                    } catch (e) { console.error('[API Error] Gagal memuat saran automation:', e); autoContainer.classList.add('hidden'); }
+                }, 350);
             });
+            autoList.addEventListener('click', (e) => {
+                const rnd = e.target.closest('[data-random-code]');
+                if (rnd) {
+                    urlInput.value = rnd.dataset.randomCode;
+                    autoContainer.classList.add('hidden');
+                    const form = document.getElementById('uploadForm');
+                    if (form && typeof form.requestSubmit === 'function') { form.requestSubmit(); }
+                    else { form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true })); }
+                    return;
+                }
+                const btn = e.target.closest('[data-auto-code]');
+                if (btn) { urlInput.value = btn.dataset.autoCode; autoContainer.classList.add('hidden'); urlInput.focus(); }
+            });
+
+            // ===== RANDOM SUGGESTION ON HOVER (HANYA VERSI DEV) =====
+            let hoverSuggestionTimer = null;
+            function loadRandomSuggestions() {
+                if (!IS_DEV) return;
+                if (urlInput.value.trim()) return;
+                const n = 10 + Math.floor(Math.random() * 11); // 10-20
+                fetch('/api/automation/random?n=' + n)
+                    .then(res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
+                    .then(data => {
+                        if (urlInput.value.trim()) return;
+                        const results = data.results || [];
+                        if (!results.length) { autoContainer.classList.add('hidden'); return; }
+                        autoList.innerHTML = results.map(r => {
+                            const code = (r.code || r.id || r.name || '').trim();
+                            const title = r.title || '';
+                            const thumb = r.thumb || '';
+                            const safeCode = escapeHtml(code);
+                            const safeTitle = escapeHtml(title);
+                            const thumbHtml = thumb ? `<img src="${escapeHtml(thumb)}" class="w-9 h-9 rounded-md object-cover border border-[#334155] shrink-0" onerror="this.style.display='none'">` : `<div class="w-9 h-9 rounded-md bg-[#334155] flex items-center justify-center text-sm shrink-0">🎬</div>`;
+                            return `<button type="button" data-random-code="${safeCode}" class="text-left w-full px-3 py-2 rounded-lg bg-[#0F172A] border border-[#334155] hover:border-[#14B8A6] hover:bg-[#1a2742] text-sm text-[#E2E8F0] transition flex items-center gap-3">${thumbHtml}<span class="min-w-0"><span class="block font-mono font-bold text-[#14B8A6]">${safeCode}</span>${safeTitle ? `<span class="block text-xs text-[#94A3B8] truncate">${safeTitle}</span>` : ''}<span class="block text-[10px] font-bold text-amber-400/90 mt-0.5">⚡ Saran acak (dev) — klik untuk cari langsung</span></span></button>`;
+                        }).join('');
+                        autoContainer.classList.remove('hidden');
+                        autoList.scrollTop = 0;
+                    })
+                    .catch(e => console.error('[API Error] Gagal memuat saran acak:', e));
+            }
+            urlInput.addEventListener('mouseenter', () => {
+                if (!IS_DEV) return;
+                clearTimeout(hoverSuggestionTimer);
+                hoverSuggestionTimer = setTimeout(loadRandomSuggestions, 450);
+            });
+            urlInput.addEventListener('mouseleave', () => {
+                clearTimeout(hoverSuggestionTimer);
+                setTimeout(() => { if (!autoContainer.matches(':hover')) { autoContainer.classList.add('hidden'); } }, 250);
+            });
+            autoContainer.addEventListener('mouseenter', () => clearTimeout(hoverSuggestionTimer));
+            autoContainer.addEventListener('mouseleave', () => autoContainer.classList.add('hidden'));
 
             // ===== FLOW PREVIEW → KONFIRMASI → DOWNLOAD =====
             function showPreview(d) {
@@ -343,6 +384,27 @@ def get_full_ui(app_version, modals_html):
                 panel.classList.remove('hidden');
             }
 
+            function renderLogs(d) {
+                const logBox = document.getElementById('logBox');
+                let html = '';
+                const gh = d.github || {};
+                const run = d.run || {};
+                const runNo = gh.run_number || gh.run_id || '';
+                if (gh.html_url || runNo) {
+                    if (gh.html_url) {
+                        html += `<div class="gh-line">> ▶️ GitHub Action: <a href="${escapeHtml(gh.html_url)}" target="_blank" rel="noopener" class="underline text-[#22D3EE]">run #${escapeHtml(String(runNo))}</a>${run.status ? ` · <span class="gh-status">${escapeHtml(run.status)}</span>` : ''}</div>`;
+                    } else {
+                        html += `<div class="gh-line">> ▶️ GitHub Action: run #${escapeHtml(String(runNo))}${run.status ? ` · ${escapeHtml(run.status)}` : ''}</div>`;
+                    }
+                    (run.steps || []).forEach(s => {
+                        const mark = s.status === 'completed' ? (s.conclusion === 'success' ? '✅' : '❌') : (s.status === 'in_progress' ? '🔄' : '⏳');
+                        html += `<div class="gh-step">>   ${mark} ${escapeHtml(s.name || '')}${s.status === 'in_progress' ? ' — sedang berjalan...' : ''}</div>`;
+                    });
+                }
+                if (d.logs && d.logs.length) html += d.logs.map(l => `<div>> ${escapeHtml(l)}</div>`).join('');
+                if (html) { logBox.innerHTML = html; logBox.scrollTop = logBox.scrollHeight; }
+            }
+
             function startPolling(taskId) {
                 clearInterval(pollTimer);
                 const progressPanel = document.getElementById('progressPanel');
@@ -353,9 +415,8 @@ def get_full_ui(app_version, modals_html):
                         const d = await res.json();
                         
                         if (d.clean_title) { document.getElementById('pFile').innerText = d.clean_title; }
-                        let pct = 0;
-                        if (d.total > 0) { pct = d.percent ? Math.floor(d.percent) : 0; }
-                        else if (d.logs && d.logs.length > 0) {
+                        let pct = d.percent && d.percent > 0 ? Math.floor(d.percent) : 0;
+                        if (pct <= 0 && d.logs && d.logs.length > 0) {
                             const lastLog = d.logs[d.logs.length - 1];
                             const match = lastLog.match(/Progres sedang berlangsung: (\d+)%/);
                             if (match) { pct = parseInt(match[1]); }
@@ -366,12 +427,8 @@ def get_full_ui(app_version, modals_html):
                         document.getElementById('pPercent').innerText = pct + '%';
                         document.getElementById('pStatus').innerText = d.status || 'Memproses...';
                         document.getElementById('pMeta').innerText = `Size: ${displaySize} • Speed: ${speedStr}`;
-                        
-                        if (d.logs && d.logs.length > 0) {
-                            const logBox = document.getElementById('logBox');
-                            logBox.innerHTML = d.logs.map(l => `<div>> ${escapeHtml(l)}</div>`).join('');
-                            logBox.scrollTop = logBox.scrollHeight;
-                        }
+
+                        renderLogs(d);
 
                         const pBar = document.getElementById('pBar');
                         const statusText = d.status || '';
@@ -390,6 +447,7 @@ def get_full_ui(app_version, modals_html):
                             document.getElementById('pSpinner').classList.add('hidden');
                             document.getElementById('pMeta').innerText = 'Preview menunggu konfirmasi';
                             showPreview(d);
+                            localStorage.setItem(PTASK_KEY, JSON.stringify({ task_id: taskId, clean_title: d.clean_title, preview: d.preview }));
                             btn.disabled = false; btn.innerText = 'Cari & Tampilkan Preview'; btn.classList.remove('opacity-75');
                             return;
                         }
@@ -397,6 +455,7 @@ def get_full_ui(app_version, modals_html):
                         if (d.status === 'Selesai') {
                             clearInterval(pollTimer);
                             isDownloading = false;
+                            localStorage.removeItem(PTASK_KEY);
                             progressPanel.className = "mt-6 bg-[#052e16] border border-[#166534] rounded-xl overflow-hidden shadow-xl shadow-green-900/20 transition-opacity duration-500";
                             document.getElementById('pStatus').className = "font-bold bg-[#14532d] text-green-300 px-3 py-1.5 rounded-lg border border-[#166534] inline-block truncate";
                             document.getElementById('pStatus').innerText = "✅ Berhasil Disimpan ke GDrive!";
@@ -417,6 +476,7 @@ def get_full_ui(app_version, modals_html):
                         if (d.status && d.status.startsWith('Gagal')) {
                             clearInterval(pollTimer);
                             isDownloading = false;
+                            localStorage.removeItem(PTASK_KEY);
                             progressPanel.className = "mt-6 bg-[#450a0a] border border-[#991b1b] rounded-xl overflow-hidden shadow-xl shadow-red-900/20";
                             document.getElementById('pStatus').className = "font-bold bg-[#7f1d1d] text-red-300 px-3 py-1.5 rounded-lg border border-[#991b1b] inline-block truncate";
                             document.getElementById('pStatus').innerText = "❌ " + d.status;
@@ -427,7 +487,7 @@ def get_full_ui(app_version, modals_html):
                     } catch (pollErr) {
                         console.error('[API Error] Gagal membaca progress:', pollErr);
                     }
-                }, 1000);
+                }, 2000);
             }
 
             document.getElementById('uploadForm').addEventListener('submit', async (e) => {
@@ -443,7 +503,8 @@ def get_full_ui(app_version, modals_html):
                     return; 
                 }
 
-                randomContainer.classList.add('hidden');
+                autoContainer.classList.add('hidden');
+                localStorage.removeItem(PTASK_KEY);
                 const btn = document.getElementById('submitBtn');
                 const errorMsg = document.getElementById('errorMsg');
                 const val = urlInput.value.trim();
@@ -451,6 +512,8 @@ def get_full_ui(app_version, modals_html):
                 else { errorMsg.classList.add('hidden'); }
                 urlInput.value = '';
                 
+                const btnC = document.getElementById('confirmDownloadBtn');
+                btnC.disabled = false; btnC.innerText = '⬇️ Unduh ke Google Drive'; btnC.classList.remove('opacity-50', 'cursor-not-allowed');
                 document.getElementById('previewPanel').classList.add('hidden');
                 const progressPanel = document.getElementById('progressPanel');
                 progressPanel.className = "mt-6 bg-[#1E293B] border border-[#334155] rounded-xl overflow-hidden shadow-xl";
@@ -490,24 +553,19 @@ def get_full_ui(app_version, modals_html):
                 }
             });
 
-            // ===== KONFIRMASI DAN UNDUH PENUH KE GDRIVE =====
+            // ===== KONFIRMASI: worker yang SAMA melanjutkan unduh (tanpa reset/restart) =====
             document.getElementById('confirmDownloadBtn').addEventListener('click', async () => {
                 if (!currentTaskId || !sessionToken) return;
                 const btnC = document.getElementById('confirmDownloadBtn');
                 btnC.disabled = true; btnC.innerText = '⏳ Menyiapkan unduhan...';
-                document.getElementById('previewPanel').classList.add('hidden');
 
                 const progressPanel = document.getElementById('progressPanel');
-                progressPanel.className = "mt-6 bg-[#1E293B] border border-[#334155] rounded-xl overflow-hidden shadow-xl";
-                document.getElementById('pBar').className = "progress-bar bg-gradient-to-r from-[#0D9488] to-[#14B8A6] h-full rounded-full relative";
-                document.getElementById('pStatus').className = "font-medium bg-[#0F172A] text-[#94A3B8] px-3 py-1.5 rounded-lg border border-[#334155] inline-block truncate";
-                document.getElementById('pSpinner').classList.remove('hidden');
-                document.getElementById('pBar').style.width = '0%';
-                document.getElementById('pPercent').innerText = '0%';
-                document.getElementById('pStatus').innerText = 'Memicu unduhan penuh ke Google Drive...';
-                document.getElementById('pMeta').innerText = 'Size: 0 B • Speed: 0 KB/s';
-                document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> Konfirmasi diterima — menyiapkan unduhan penuh...</div>';
                 progressPanel.classList.remove('hidden');
+                document.getElementById('pSpinner').classList.remove('hidden');
+                document.getElementById('pStatus').className = "font-medium bg-[#0F172A] text-[#94A3B8] px-3 py-1.5 rounded-lg border border-[#334155] inline-block truncate";
+                document.getElementById('pStatus').innerText = 'Melanjutkan unduhan penuh — progres tidak di-reset...';
+                document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> Konfirmasi diterima — worker yang sama melanjutkan unduhan penuh...</div>';
+                document.getElementById('previewPanel').classList.remove('hidden');
                 isDownloading = true;
 
                 try {
@@ -517,7 +575,7 @@ def get_full_ui(app_version, modals_html):
                         body: JSON.stringify({ task_id: currentTaskId, session_token: sessionToken })
                     });
                     if (!res.ok) throw new Error(`Status ${res.status}: ${await res.text()}`);
-                    btnC.disabled = false; btnC.innerText = '⬇️ Unduh ke Google Drive';
+                    btnC.disabled = true; btnC.innerText = '🔒 Unduhan diproses — tombol dinonaktifkan'; btnC.classList.add('opacity-50', 'cursor-not-allowed');
                     startPolling(currentTaskId);
                 } catch (err) {
                     console.error('[API Error] Gagal konfirmasi unduhan:', err);
@@ -531,6 +589,78 @@ def get_full_ui(app_version, modals_html):
                     document.getElementById('previewPanel').classList.remove('hidden');
                 }
             });
+            
+            // ===== RESET: dialog konfirmasi → HARD RESET murni =====
+            function openResetModal() {
+                const m = document.getElementById('resetModal');
+                if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+            }
+            function closeResetModal() {
+                const m = document.getElementById('resetModal');
+                if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+            }
+
+            function resetTask() {
+                openResetModal();
+            }
+
+            async function performHardReset() {
+                clearInterval(pollTimer);
+                pollTimer = null;
+                isDownloading = false;
+
+                // Hapus task/log/result lama di server (TANPA dispatch / memproses).
+                try {
+                    await fetch('/api/reset', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ task_id: currentTaskId, session_token: sessionToken })
+                    });
+                } catch (err) { console.error('[API Error] Gagal reset state server:', err); }
+
+                currentTaskId = '';
+                // Hapus SEMUA state frontend: localStorage + sessionStorage.
+                try { localStorage.clear(); } catch (e) {}
+                try { sessionStorage.clear(); } catch (e) {}
+                sessionToken = '';
+                updateDriveUI(false);
+                document.getElementById('authPopover').classList.add('hidden');
+
+                const progressPanel = document.getElementById('progressPanel');
+                progressPanel.className = "mt-6 bg-[#1E293B] border border-[#334155] rounded-xl overflow-hidden shadow-xl";
+                progressPanel.classList.remove('hidden', 'opacity-0');
+                document.getElementById('previewPanel').classList.add('hidden');
+
+                document.getElementById('pBar').className = "progress-bar bg-gradient-to-r from-[#0D9488] to-[#14B8A6] h-full rounded-full relative";
+                document.getElementById('pBar').style.width = '0%';
+                document.getElementById('pPercent').innerText = '0%';
+                document.getElementById('pStatus').className = "font-medium bg-[#0F172A] text-[#94A3B8] px-3 py-1.5 rounded-lg border border-[#334155] inline-block truncate";
+                document.getElementById('pStatus').innerText = 'Menyiapkan...';
+                document.getElementById('pSpinner').classList.remove('hidden');
+                document.getElementById('pMeta').innerText = 'Size: 0 B • Speed: 0 KB/s';
+                document.getElementById('pFile').innerText = 'Memproses...';
+                document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> System initialized...</div>';
+
+                const submitBtn = document.getElementById('submitBtn');
+                submitBtn.disabled = false; submitBtn.innerText = 'Mulai Pencarian & Unduh'; submitBtn.classList.remove('opacity-75');
+
+                const confirmBtn = document.getElementById('confirmDownloadBtn');
+                confirmBtn.disabled = false; confirmBtn.innerText = '⬇️ Unduh ke Google Drive'; confirmBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+
+                const input = document.getElementById('urlInput');
+                if (input) { input.value = ''; input.focus(); }
+                const errorMsg = document.getElementById('errorMsg');
+                if (errorMsg) errorMsg.classList.add('hidden');
+                const autoContainer = document.getElementById('autoSuggestContainer');
+                if (autoContainer) autoContainer.classList.add('hidden');
+
+                closeResetModal();
+            }
+
+            document.getElementById('resetBtn').addEventListener('click', resetTask);
+            document.getElementById('confirmResetBtn').addEventListener('click', performHardReset);
+            document.getElementById('cancelResetBtn').addEventListener('click', closeResetModal);
+            document.getElementById('resetModal').addEventListener('click', (e) => { if (e.target.id === 'resetModal') closeResetModal(); });
             
             // 🟢 LOAD HISTORY DENGAN TOMBOL VIEW (STREAMING MANUAL KE DRIVE) DI BAWAH TOMBOL DELETE
             async function loadHistory() {
@@ -895,53 +1025,32 @@ def get_full_ui(app_version, modals_html):
                 else { startAuthFlow(); }
             });
 
-            // ===== AUTOMATION (DARI DATABASE) =====
-            async function loadAutomations() {
-                const list = document.getElementById('automationList');
-                if (!list) return;
+            // ===== RESUME PREVIEW SAAT HALAMAN DI-RELOAD (state via localStorage task_id) =====
+            (function restorePreviewState() {
                 try {
-                    list.innerHTML = '<div class="flex flex-col items-center justify-center h-40 text-center"><span class="text-4xl mb-2 opacity-50 animate-spin" style="width:1.5rem;height:1.5rem;font-size:1.5rem">⏳</span><p class="text-[#64748B] text-sm">Memuat automation...</p></div>';
-                    const res = await fetch('/api/automations');
-                    if (!res.ok) throw new Error(`HTTP Error ${res.status}: ${await res.text()}`);
-                    const data = await res.json();
-                    const items = data.items || [];
-
-                    if (!items.length) {
-                        list.innerHTML = '<div class="flex flex-col items-center justify-center h-40 text-center"><span class="text-4xl mb-2 opacity-50">🤖</span><p class="text-[#64748B] text-sm">Belum ada automation. Buat di database (automations table).</p></div>';
-                        return;
-                    }
-
-                    list.innerHTML = items.map(a => {
-                        const cfg = a.config ? JSON.stringify(a.config) : '{}';
-                        const enabled = a.enabled
-                            ? '<span class="px-2 py-0.5 bg-emerald-500/10 text-emerald-400 border-emerald-500/20 border rounded text-[10px] font-bold uppercase">Aktif</span>'
-                            : '<span class="px-2 py-0.5 bg-gray-500/10 text-gray-400 border-gray-600/30 border rounded text-[10px] font-bold uppercase">Nonaktif</span>';
-                        return `<div class="p-4 bg-[#1E293B] hover:bg-[#283548] border border-[#334155] rounded-xl transition-all">
-                            <div class="flex flex-wrap items-center justify-between gap-2">
-                                <div class="flex items-center gap-3 min-w-0">
-                                    <span class="text-xs font-mono text-[#14B8A6] bg-[#0F172A] px-2 py-1 rounded-lg border border-[#334155]">#${a.id}</span>
-                                    <h4 class="font-bold text-sm text-white truncate">${escapeHtml(a.name)}</h4>
-                                    ${enabled}
-                                </div>
-                                <div class="flex items-center gap-2 text-[11px] font-mono text-[#94A3B8]">
-                                    <span class="px-2 py-0.5 bg-[#0F172A] rounded-lg border border-[#334155]">setiap ${a.interval_minutes} menit</span>
-                                    <span class="px-2 py-0.5 bg-[#0F172A] rounded-lg border border-[#334155]">${escapeHtml(a.action)}</span>
-                                </div>
-                            </div>
-                            <div class="mt-2 text-[11px] text-[#94A3B8] font-mono bg-[#0A0F1C] rounded-lg border border-[#334155] p-2 break-all">config: ${escapeHtml(cfg)}</div>
-                            <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-1 text-[11px] text-[#64748B]">
-                                <span>Terakhir jalan: ${escapeHtml(a.last_run_at || '—')}</span>
-                                <span>Jalan lagi: ${escapeHtml(a.next_run_at || '—')}</span>
-                                <span>Dibuat: ${escapeHtml(a.created_at || '—')}</span>
-                                <span>Diperbarui: ${escapeHtml(a.updated_at || '—')}</span>
-                            </div>
-                        </div>`;
-                    }).join('');
+                    const raw = localStorage.getItem(PTASK_KEY);
+                    if (!raw) return;
+                    const saved = JSON.parse(raw);
+                    if (!saved || !saved.task_id) { localStorage.removeItem(PTASK_KEY); return; }
+                    const progressPanel = document.getElementById('progressPanel');
+                    currentTaskId = saved.task_id;
+                    showPreview({ preview: saved.preview || {}, clean_title: saved.clean_title || '' });
+                    progressPanel.classList.remove('hidden');
+                    document.getElementById('pFile').innerText = saved.clean_title || (saved.preview && saved.preview.filename) || currentTaskId;
+                    document.getElementById('pBar').className = "progress-bar bg-gradient-to-r from-[#0D9488] to-[#14B8A6] h-full rounded-full relative";
+                    document.getElementById('pBar').style.width = '100%';
+                    document.getElementById('pPercent').innerText = '100%';
+                    document.getElementById('pStatus').className = "font-bold bg-[#052e16] text-emerald-300 px-3 py-1.5 rounded-lg border border-[#166534] inline-block truncate";
+                    document.getElementById('pStatus').innerText = '✅ Preview ditemukan — klik "Unduh ke Google Drive" untuk kirim ke GDrive';
+                    document.getElementById('pSpinner').classList.add('hidden');
+                    document.getElementById('pMeta').innerText = 'Preview menunggu konfirmasi';
+                    document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> Memulihkan sesi terakhir — polling berlanjut tiap 2 detik...</div>';
+                    startPolling(currentTaskId);
                 } catch (err) {
-                    console.error('[API Error] Gagal memuat automation:', err);
-                    list.innerHTML = `<div class="text-center text-red-400 mt-4 p-4 bg-red-950/30 rounded-xl border border-red-900/50">❌ Gagal memuat automation.<br><span class="text-xs text-red-500/80">${escapeHtml(err.message)}</span></div>`;
+                    console.error('[API Error] Gagal memulihkan preview terakhir:', err);
+                    try { localStorage.removeItem(PTASK_KEY); } catch (e2) {}
                 }
-            }
+            })();
 
             checkDriveStatus();
         </script>
@@ -950,4 +1059,5 @@ def get_full_ui(app_version, modals_html):
     """
     template = template.replace("__APP_VERSION__", app_version)
     template = template.replace("__MODALS_INJECTION__", modals_html)
+    template = template.replace("__IS_DEV__", "true" if is_dev else "false")
     return template

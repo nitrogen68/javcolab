@@ -20,15 +20,20 @@ from googleapiclient.discovery import build
 from pydantic import BaseModel
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from db import (init_db, create_task, update_task, add_log, get_task, upsert_session,
+from db import (init_db, create_task, update_task, patch_task_meta, add_log, get_task, upsert_session,
     get_session_email, upsert_history, list_history, delete_history, clear_history,
     find_history_duplicate, list_automations, upsert_automation, due_automations,
-    mark_automation_run)
+    mark_automation_run, db_check, search_automations, random_automations, autodb_status,
+    delete_task, delete_tasks_by_session)
 from ui.html import get_full_ui
 from ui.modal import get_modals_html
 
 app=FastAPI(title="Remote Uploader",docs_url=None,redoc_url=None)
-APP_VERSION="1.4.2 (Realtime Logs + Preview + Reset + GitHub Actions)"
+DEV_MODE=bool(int((os.environ.get("DEV") or "0").strip() or "0"))
+APP_VERSION="1.4.0 (Vercel + PostgreSQL + GitHub Actions + Playwright)"
+if DEV_MODE:APP_VERSION+=" · DEV (suggestion hover aktif)"
+
+GDRIVE_SCOPE="https://www.googleapis.com/auth/drive.file"
 GH_TOKEN=os.environ.get("GH_TOKEN","");GH_REPO=os.environ.get("GH_REPO","");GH_BRANCH=os.environ.get("GH_BRANCH","main")
 API_BASE=os.environ.get("API_BASE","").rstrip("/");WORKER_SECRET=os.environ.get("WORKER_SECRET","")
 GOOGLE_CLIENT_ID=os.environ.get("GOOGLE_CLIENT_ID","");GOOGLE_CLIENT_SECRET=os.environ.get("GOOGLE_CLIENT_SECRET","")
@@ -39,9 +44,12 @@ FERNET=Fernet(base64.urlsafe_b64encode(_ENC[:32]))
 WORKER_WORKFLOW_FILE="puppeter-worker.yml"
 
 def _normalize_gdrive_folder(raw=None):
+    """Normalisasi GDRIVE_FOLDER: hanya nama folder di root Drive.
+    Buang prefix 'GDRIVE_FOLDER=' bila secret terlanjur terisi salah."""
     val=(raw or "").replace("GDRIVE_FOLDER=","").strip().strip("/")
     name=os.path.basename(val) if val else ""
-    return name if name not in ("",".","..") else "javColab"
+    if not name or name in (".",".."):return "javColab"
+    return name
 
 GDRIVE_FOLDER=_normalize_gdrive_folder(os.environ.get("GDRIVE_FOLDER","javColab"))
 
@@ -122,6 +130,48 @@ def dispatch_repo(event_type,payload):
         + " — pastikan GH_TOKEN punya scope 'repo' + 'workflow', dan workflow file ada di branch main."
     )
 
+def _gh_time(iso:str)->float:
+    try:return datetime.fromisoformat(iso.replace("Z","+00:00")).timestamp()
+    except Exception:return 0.0
+
+def resolve_run_after_dispatch(method:str):
+    """Cari run_id GitHub Actions yang baru dibuat oleh dispatch.
+    workflow_dispatch/repository_dispatch tidak mengembalikan run_id,
+    jadi kita ambil run terbaru dengan event+branch yang sama (< 90 detik)."""
+    if not GH_REPO:return None
+    try:
+        if method=="workflow_dispatch":
+            url=f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{WORKER_WORKFLOW_FILE}/runs"
+        else:
+            url=f"https://api.github.com/repos/{GH_REPO}/actions/runs"
+        r=requests.get(url,headers=_gh_headers(),params={"branch":GH_BRANCH,"event":method,"per_page":5},timeout=15)
+        if r.status_code!=200:return None
+        for run in r.json().get("workflow_runs",[]):
+            if _gh_time(run.get("created_at") or "") and time.time()-_gh_time(run.get("created_at") or "")>90:continue
+            return {"run_id":run.get("id"),"run_number":run.get("run_number"),"html_url":run.get("html_url"),"status":run.get("status")}
+    except Exception:return None
+    return None
+
+_STEP_CACHE={}
+def gh_run_summary(run_id):
+    """Status run + daftar step job worker secara real-time dari GitHub API (cache 8 dtk)."""
+    key=str(run_id);now=time.time();c=_STEP_CACHE.get(key)
+    if c and now-c[0]<8:return c[1]
+    try:
+        r=requests.get(f"https://api.github.com/repos/{GH_REPO}/actions/runs/{run_id}/jobs",headers=_gh_headers(),params={"per_page":20},timeout=12)
+        if r.status_code!=200:_STEP_CACHE[key]=(now,{});return {}
+        jobs=r.json().get("jobs",[])
+        if not jobs:_STEP_CACHE[key]=(now,{});return {}
+        j=jobs[0]
+        summary={
+            "status":j.get("status",""),
+            "conclusion":j.get("conclusion") or "",
+            "name":j.get("name",""),
+            "steps":[{"number":s.get("number"),"name":s.get("name"),"status":s.get("status"),"conclusion":s.get("conclusion")} for s in j.get("steps",[])],
+        }
+        _STEP_CACHE[key]=(now,summary);return summary
+    except Exception:return {}
+
 def require_worker(req:Request):
     sec=(req.headers.get("x-worker-secret") or "").strip()
     bearer=(req.headers.get("authorization") or "").strip()
@@ -157,7 +207,7 @@ def load_token(session_token):
 def gdrive_service(session_token):
     token=load_token(session_token)
     if not token:raise HTTPException(status_code=404,detail="Sesi tidak terhubung")
-    creds=Credentials(token=token.get("access_token"),refresh_token=token.get("refresh_token"),token_uri="https://oauth2.googleapis.com/token",client_id=token.get("client_id") or GOOGLE_CLIENT_ID,client_secret=token.get("client_secret") or GOOGLE_CLIENT_SECRET,scopes=["https://www.googleapis.com/auth/drive.file"])
+    creds=Credentials(token=token.get("access_token"),refresh_token=token.get("refresh_token"),token_uri="https://oauth2.googleapis.com/token",client_id=token.get("client_id") or GOOGLE_CLIENT_ID,client_secret=token.get("client_secret") or GOOGLE_CLIENT_SECRET,scopes=[GDRIVE_SCOPE])
     if creds.expired:creds.refresh(GoogleRequest());token["access_token"]=creds.token;save_token(session_token,token)
     return build("drive","v3",credentials=creds)
 
@@ -199,14 +249,30 @@ def health():
         "gdrive_folder":GDRIVE_FOLDER,
     }
 
-@app.get("/api/saran_random")
-def get_saran_random():
-    try:
-        b64,_=gh_get("data/suggestions.json")
-        if not b64:return []
-        rows=json.loads(base64.b64decode(b64).decode());import random
-        return [r.get("id") for r in random.sample(rows,min(5,len(rows))) if r.get("id")]
-    except Exception:return []
+@app.get("/api/db/check")
+def api_db_check():
+    """Cek endpoint khusus: pastikan semua database terload (Postgres + automation DB)."""
+    _db_ready()
+    tables,tok=db_check()
+    autodbs,autook=autodb_status()
+    ok=tok and autook
+    return {"ok":ok,"status":"loaded" if ok else "missing","tables":tables,"databases":autodbs.get("databases",{}),"app":APP_VERSION}
+
+@app.get("/api/automation/search")
+def api_automation_search(q:str=""):
+    """Cari kode dari automation DB (search_logs / javDbs.db).
+    Dipakai UI untuk autocomplete — mis. ketik 'vem' → VEMA-101…VEMA-258."""
+    _db_ready()
+    q=(q or "").strip()
+    return {"ok":True,"query":q,"results":search_automations(q)}
+
+@app.get("/api/automation/random")
+def api_automation_random(n:int=15):
+    """Kode video_id acak dari pool database — dipakai suggestion on hover (dev).
+    Jumlah di-random oleh UI (10–20); endpoint membatasi maks 50."""
+    _db_ready()
+    n=max(1,min(50,int(n or 15)))
+    return {"ok":True,"results":random_automations(n)}
 
 @app.get("/api/auth/status")
 def api_auth_status(session_token:str=""):
@@ -239,7 +305,7 @@ def api_poll_token(data:dict):
         token=r.json();import secrets
         session=secrets.token_urlsafe(32);token["client_id"]=GOOGLE_CLIENT_ID;token["client_secret"]=GOOGLE_CLIENT_SECRET;save_token(session,token);email=""
         try:
-            creds=Credentials(token=token.get("access_token"),refresh_token=token.get("refresh_token"),token_uri="https://oauth2.googleapis.com/token",client_id=GOOGLE_CLIENT_ID,client_secret=GOOGLE_CLIENT_SECRET,scopes=["https://www.googleapis.com/auth/drive"]);email=build("drive","v3",credentials=creds).about().get(fields="user(emailAddress)").execute()["user"]["emailAddress"]
+            creds=Credentials(token=token.get("access_token"),refresh_token=token.get("refresh_token"),token_uri="https://oauth2.googleapis.com/token",client_id=GOOGLE_CLIENT_ID,client_secret=GOOGLE_CLIENT_SECRET,scopes=[GDRIVE_SCOPE]);email=build("drive","v3",credentials=creds).about().get(fields="user(emailAddress)").execute()["user"]["emailAddress"]
         except Exception:pass
         _db_ready();upsert_session(session,email);pending_del(code);return {"status":"success","session_token":session,"email":email}
     info=r.json() if r.text else {};err=info.get("error","")
@@ -267,14 +333,20 @@ def process_download(req:DownloadRequest):
     if raw.startswith(("http://","https://")):raise HTTPException(status_code=400,detail="Masukkan kode pencarian, bukan URL!")
     if not req.session_token:
         raise HTTPException(status_code=401,detail="Harus login Google Drive dulu sebelum unduh")
-    _db_ready();email=get_session_email(req.session_token) if req.session_token else "";dupe=find_history_duplicate(raw,email) if email else None
-    if dupe:
-        create_task(raw,raw,req.session_token,{"clean_title":dupe.get("name",raw),"status_text":"Sudah ada di riwayat, unduhan dilewati."});update_task(raw,status="Selesai",progress=100,message="Sudah ada di riwayat",completed_at=datetime.now(timezone.utc));add_log(raw,f"✅ [DUPLIKAT] '{dupe.get('name',raw)}' sudah ada. Melewati unduhan.");return {"status":"started","task_id":raw,"skipped":"duplicate"}
+    _db_ready();email=get_session_email(req.session_token) if req.session_token else ""
     # Hanya skip dispatch jika worker BENAR-BENAR sedang jalan (bukan queued yang bisa stuck)
     existing=get_task(raw)
     active_statuses=("Memproses","Mengunduh","Mengunggah","Memproses pencarian...")
     if existing and existing.get("status") in active_statuses:
         return {"status":"started","task_id":raw,"skipped":"already_running","current_status":existing.get("status")}
+    # Log bersih: kalau kode sudah pernah diproses sebelumnya, hapus task + log + result
+    # lamanya dulu supaya tidak menumpuk (mis. 'Menerima input: X' berkali-kali).
+    # Progress baru dimulai murni dari 0% tanpa runId/preview lama.
+    if existing:
+        delete_task(raw)
+    dupe=find_history_duplicate(raw,email) if email else None
+    if dupe:
+        create_task(raw,raw,req.session_token,{"clean_title":dupe.get("name",raw),"status_text":"Sudah ada di riwayat, unduhan dilewati."});update_task(raw,status="Selesai",progress=100,message="Sudah ada di riwayat",completed_at=datetime.now(timezone.utc));add_log(raw,f"✅ [DUPLIKAT] '{dupe.get('name',raw)}' sudah ada. Melewati unduhan.");return {"status":"started","task_id":raw,"skipped":"duplicate"}
     # Selalu buat/update task + dispatch ulang (queued/gagal/selesai lama → coba lagi)
     # Mode awal: PREVIEW (cari + metadata) dulu, unduh penuh HANYA setelah user konfirmasi.
     create_task(raw,raw,req.session_token,{"clean_title":"","status_text":"Menunggu worker GitHub Actions...","created":wib_time(),"mode":"preview","confirmed":False})
@@ -283,6 +355,10 @@ def process_download(req:DownloadRequest):
     try:
         info=dispatch_repo("jav-task",{"task_id":raw})
         add_log(raw,f"✅ Dispatch berhasil via {info.get('method')} HTTP {info.get('status')} — cek tab Actions (Puppeter Worker)")
+        run=resolve_run_after_dispatch(info.get("method") or "") or None
+        if run:
+            patch_task_meta(raw,{"github":run})
+            add_log(raw,f"▶️ GitHub Action: run #{run.get('run_number') or run.get('run_id')} — {run.get('html_url')}")
         update_task(raw,status="queued",message=f"Menunggu runner ({info.get('method')})...")
     except Exception as e:
         update_task(raw,status="Gagal: scheduling",message=f"Gagal dispatch GitHub Actions: {e}",error=str(e));add_log(raw,f"❌ {e}","error");raise HTTPException(status_code=500,detail=f"Gagal dispatch: {e}")
@@ -291,23 +367,42 @@ def process_download(req:DownloadRequest):
 class ConfirmRequest(BaseModel):
     task_id:str;session_token:str=""
 
+class ResetRequest(BaseModel):
+    task_id:str="";session_token:str=""
+
+@app.post("/api/reset")
+def hard_reset(req:ResetRequest):
+    """Hard reset (dipanggil oleh tombol Reset di UI setelah konfirmasi).
+
+    Hanya menghapus state di database (task + seluruh log/result preview lama).
+    TIDAK memicu /dispatch atau proses scraping apa pun — worker tidak disentuh.
+    Frontend wajib membersihkan state lokal (localStorage/sessionStorage) sendiri.
+    """
+    _db_ready()
+    tid=(req.task_id or "").strip()
+    if tid:
+        delete_task(tid)
+        return {"ok":True,"cleared":"task","task_id":tid}
+    if req.session_token:
+        n=delete_tasks_by_session(req.session_token)
+        return {"ok":True,"cleared":"session","session_token":req.session_token,"cleared_count":n}
+    return {"ok":True,"cleared":None}
+
 @app.post("/api/download/confirm")
 def confirm_download(req:ConfirmRequest):
-    """Konfirmasi preview → ubah task ke mode=download (confirmed=True) lalu re-dispatch worker."""
+    """Konfirmasi preview → worker yang SAMA (sedang menunggu) melanjutkan unduh
+    penuh tanpa dispatch/re-run baru. Progres berlanjut, tidak di-reset."""
     tid=req.task_id.strip()
     if not tid:raise HTTPException(status_code=400,detail="task_id wajib")
     if not req.session_token:raise HTTPException(status_code=401,detail="Harus login Google Drive dulu")
     _db_ready();current=get_task(tid)
     if not current:raise HTTPException(status_code=404,detail=f"Task {tid} tidak ditemukan")
-    # Hanya skip re-dispatch jika status benar-benar aktif (worker jalan), BUKAN queued stuck.
-    active_statuses=("Memproses","Mengunduh","Mengunggah","Memproses pencarian...","Scheduling")
-    if current.get("status") in active_statuses:
-        return {"status":"started","task_id":tid,"skipped":"already_running","current_status":current.get("status")}
+    if current.get("confirmed"):
+        return {"status":"already_confirmed","task_id":tid,"current_status":current.get("status")}
     meta=dict(current.get("meta") or {});meta["confirmed"]=True;meta["mode"]="download"
-    start_pct=max(20,int(current.get("progress") or 20))
-    update_task(tid,meta=meta,session_token=req.session_token,status=current.get("status") or "Mengunduh",message="Konfirmasi diterima — melanjutkan worker yang sama.",progress=start_pct)
-    add_log(tid,"✅ Konfirmasi diterima — worker yang sama melanjutkan unduh penuh + upload ke Google Drive.")
-    return {"status":"started","task_id":tid,"skipped":"same_worker","progress":start_pct}
+    update_task(tid,meta=meta,session_token=req.session_token,status="Memproses unduhan...",message="Konfirmasi diterima — mendownload penuh...",progress=20)
+    add_log(tid,"✅ Konfirmasi diterima — worker melanjutkan unduh penuh tanpa restart.")
+    return {"status":"confirmed","task_id":tid,"confirmed":True}
 
 class ReportBody(BaseModel):
     task_id:str;task:dict={};history_item:dict|None=None
@@ -333,46 +428,20 @@ def task_report(body:ReportBody,request:Request):
         upsert_history(item)
     return {"ok":True}
 
-@app.delete("/api/progress/{task_id:path}")
-def delete_progress(task_id:str):
-    _db_ready()
-    tid=_normalize_code(task_id)
-    if not tid:return {"ok":True,"deleted":False}
-    with __import__("db").db() as conn:
-        conn.execute("DELETE FROM tasks WHERE task_id=%s",(tid,))
-    return {"ok":True,"deleted":True,"task_id":tid}
-
-@app.get("/api/automation/random")
-def automation_random(n:int=15):
-    _db_ready()
-    import random, sqlite3
-    codes=[]
-    for item in list_automations():
-        cfg=item.get("config") or {}
-        code=cfg.get("code") or cfg.get("url")
-        if code:codes.append(str(code).strip())
-    try:
-        p=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),"data","javDbs.db")
-        con=sqlite3.connect(p); con.row_factory=sqlite3.Row
-        cols=[r[1] for r in con.execute("PRAGMA table_info(search_logs)").fetchall()]
-        if "video_id" in cols:
-            rows=con.execute("SELECT video_id FROM search_logs WHERE video_id IS NOT NULL AND TRIM(video_id)<>'' ORDER BY RANDOM() LIMIT 100").fetchall()
-            codes.extend([str(r["video_id"]).strip() for r in rows])
-        con.close()
-    except Exception:pass
-    unique=list(dict.fromkeys(c for c in codes if c));random.shuffle(unique)
-    n=max(10,min(20,int(n or 15)))
-    return {"ok":True,"items":unique[:n]}
-
 @app.get("/api/progress/{task_id:path}")
 def get_progress(task_id:str):
     _db_ready();t=get_task(task_id)
     if not t:return {}
     meta=t.pop("meta",{}) or {};code=t.get("code") or task_id
-    out={"id":code,"task_id":t.get("task_id"),"status":t.get("status"),"percent":t.get("progress",0),"speed":t.get("speed_kbps",0),"downloaded":meta.get("downloaded",0),"total":meta.get("total",t.get("size_bytes",0)),"clean_title":meta.get("clean_title",""),"status_text":t.get("message",meta.get("status_text","")),"logs":t.get("logs",[]),"created":meta.get("created",t.get("created_at")),"updated":t.get("updated_at"),"session_token":t.get("session_token","")}
+    out={"id":code,"task_id":t.get("task_id"),"status":t.get("status"),"percent":t.get("progress",0),"speed":t.get("speed_kbps",0),"downloaded":meta.get("downloaded",0),"total":meta.get("total",t.get("size_bytes",0)),"clean_title":meta.get("clean_title",""),"status_text":t.get("message",meta.get("status_text","")),"logs":[x.get("message") for x in t.get("logs",[])],"created":meta.get("created",t.get("created_at")),"updated":t.get("updated_at"),"session_token":t.get("session_token","")}
     out["preview"]=meta.get("preview") or None
     out["confirmed"]=bool(meta.get("confirmed"))
     out["mode"]=str(meta.get("mode") or ("download" if out["confirmed"] else "preview"))
+    github=dict(meta.get("github") or {})
+    out["github"]=github
+    if github.get("run_id"):
+        try:out["run"]=gh_run_summary(github["run_id"])
+        except Exception:out["run"]={}
     if t.get("result") is not None:out["result"]=t["result"]
     if t.get("error"):out["error"]=t["error"]
     return out
@@ -412,11 +481,6 @@ class AutomationBody(BaseModel):
 def automation_list(request:Request):
     require_worker(request);_db_ready();return list_automations()
 
-@app.get("/api/automations")
-def automations_public():
-    """List automations dari PostgreSQL (publik, tanpa worker secret)."""
-    _db_ready();items=list_automations();return {"ok":True,"items":items,"count":len(items)}
-
 @app.post("/api/automation")
 def automation_save(body:AutomationBody,request:Request):
     require_worker(request);_db_ready();return {"ok":True,"id":upsert_automation(body.name,body.interval_minutes,body.action,body.config,body.enabled)}
@@ -428,13 +492,20 @@ def automation_run(request:Request):
         cfg=a.get("config") or {};code=str(cfg.get("code") or cfg.get("url") or "").strip()
         if not code:mark_automation_run(a["id"]);results.append({"id":a["id"],"status":"skipped","reason":"config.code kosong"});continue
         tid=f"auto-{a['id']}-{int(time.time())}";create_task(tid,code,str(cfg.get("session_token") or ""),{"automation_id":a["id"],"created":wib_time()});add_log(tid,f"🤖 Automation '{a['name']}' dijalankan")
-        try:dispatch_repo("jav-task",{"task_id":tid});mark_automation_run(a["id"]);results.append({"id":a["id"],"task_id":tid,"status":"dispatched"})
-        except Exception as e:update_task(tid,status="Gagal: scheduling",error=str(e),message=str(e));results.append({"id":a["id"],"status":"error","error":str(e)})
+        try:dispatch_repo("jav-task",{"task_id":tid});mark_automation_run(a["id"])
+        except Exception as e:update_task(tid,status="Gagal: scheduling",error=str(e),message=str(e));results.append({"id":a["id"],"status":"error","error":str(e)});continue
+        if GH_REPO:
+            try:
+                run=resolve_run_after_dispatch("workflow_dispatch")
+                if run:
+                    patch_task_meta(tid,{"github":run});add_log(tid,f"▶️ GitHub Action: run #{run.get('run_number') or run.get('run_id')} — {run.get('html_url')}")
+            except Exception:pass
+        results.append({"id":a["id"],"task_id":tid,"status":"dispatched"})
     return {"ok":True,"results":results}
 
 @app.get("/api",response_class=HTMLResponse,include_in_schema=False)
 @app.get("/api/",response_class=HTMLResponse,include_in_schema=False)
-def serve_api_ui():return HTMLResponse(content=get_full_ui(APP_VERSION,get_modals_html()))
+def serve_api_ui():return HTMLResponse(content=get_full_ui(APP_VERSION,get_modals_html(),DEV_MODE))
 
 @app.get("/",response_class=HTMLResponse,include_in_schema=False)
-def serve_ui():return HTMLResponse(content=get_full_ui(APP_VERSION,get_modals_html()))
+def serve_ui():return HTMLResponse(content=get_full_ui(APP_VERSION,get_modals_html(),DEV_MODE))
