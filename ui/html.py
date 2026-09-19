@@ -120,7 +120,7 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                         </div>
                         <div class="grid grid-cols-3 gap-1 sm:gap-2 mt-3 items-stretch">
                             <button id="confirmDownloadBtn" class="px-1 sm:px-2 py-3 min-w-0 text-[10px] sm:text-sm text-center leading-tight bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 text-white font-bold rounded-xl shadow-lg shadow-emerald-900/30">⬇️ Unduh<br class="sm:hidden"> ke Google Drive</button>
-                            <button id="doodDownloadBtn" class="px-1 sm:px-2 py-3 min-w-0 text-[10px] sm:text-sm text-center leading-tight bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-700 hover:to-amber-600 text-white font-bold rounded-xl shadow-lg shadow-orange-900/30">🎬 Doodstream<br class="sm:hidden"> (via API)</button>
+                            <button id="byseDownloadBtn" class="px-1 sm:px-2 py-3 min-w-0 text-[10px] sm:text-sm text-center leading-tight bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-700 hover:to-amber-600 text-white font-bold rounded-xl shadow-lg shadow-orange-900/30">🎬 Byse<br class="sm:hidden"> (via API)</button>
                             <button id="directDownloadBtn" class="px-1 sm:px-2 py-3 min-w-0 text-[10px] sm:text-sm text-center leading-tight bg-gradient-to-r from-sky-600 to-cyan-500 hover:from-sky-700 hover:to-cyan-600 text-white font-bold rounded-xl shadow-lg shadow-sky-900/30">📥 Unduh<br class="sm:hidden"> Langsung</button>
                         </div>
                         <button id="resetBtn" class="mt-2 w-full sm:w-auto px-6 h-11 bg-gradient-to-r from-red-600 to-orange-500 hover:from-red-700 hover:to-orange-600 text-white font-bold rounded-xl shadow-lg shadow-red-900/30">🔄 Reset & Mulai Tugas Baru</button>
@@ -578,7 +578,7 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                             isDownloading = false;
                             document.getElementById('pBar').style.width = '100%';
                             document.getElementById('pPercent').innerText = '100%';
-document.getElementById('pStatus').innerText = '✅ Preview ditemukan — pilih tujuan unduhan (Google Drive / Doodstream / Langsung)';
+document.getElementById('pStatus').innerText = '✅ Preview ditemukan — pilih tujuan unduhan (Google Drive / Byse / Langsung)';
                             document.getElementById('pStatus').className = "font-bold bg-[#052e16] text-emerald-300 px-3 py-1.5 rounded-lg border border-[#166534] inline-block truncate";
                             document.getElementById('pSpinner').classList.add('hidden');
                             document.getElementById('pMeta').innerText = 'Preview menunggu konfirmasi';
@@ -594,7 +594,7 @@ document.getElementById('pStatus').innerText = '✅ Preview ditemukan — pilih 
                             localStorage.removeItem(PTASK_KEY);
                             progressPanel.className = "mt-6 bg-[#052e16] border border-[#166534] rounded-xl overflow-hidden shadow-xl shadow-green-900/20 transition-opacity duration-500";
                             document.getElementById('pStatus').className = "font-bold bg-[#14532d] text-green-300 px-3 py-1.5 rounded-lg border border-[#166534] inline-block truncate";
-                            document.getElementById('pStatus').innerText = "✅ " + ((d.destination === 'dood' || d.destination === 'direct') ? (d.status_text || 'Berhasil!') : 'Berhasil Disimpan ke Google Drive!');
+                            document.getElementById('pStatus').innerText = "✅ " + ((d.destination === 'byse' || d.destination === 'direct') ? (d.status_text || 'Berhasil!') : 'Berhasil Disimpan ke Google Drive!');
                             document.getElementById('pBar').className = "progress-bar bg-green-500 h-full rounded-full relative";
                             document.getElementById('pSpinner').classList.add('hidden');
                             document.getElementById('previewPanel').classList.add('hidden');
@@ -690,29 +690,29 @@ document.getElementById('pStatus').innerText = '✅ Preview ditemukan — pilih 
                 }
             });
 
-            // ===== KONFIRMASI: 3 tujuan unduhan (Google Drive / Doodstream / Langsung) =====
+            // ===== KONFIRMASI: 3 tujuan unduhan (Google Drive / Byse / Langsung) =====
             function setActionButtonsDisabled(disabled) {
-                ['confirmDownloadBtn', 'doodDownloadBtn', 'directDownloadBtn'].forEach(id => {
+                ['confirmDownloadBtn', 'byseDownloadBtn', 'directDownloadBtn'].forEach(id => {
                     const b = document.getElementById(id);
                     if (b) { b.disabled = disabled; b.classList.toggle('opacity-50', disabled); b.classList.toggle('cursor-not-allowed', disabled); }
                 });
             }
             function resetActionButtons() {
-                const map = { confirmDownloadBtn: '⬇️ Unduh ke Google Drive', doodDownloadBtn: '🎬 Doodstream (via API)', directDownloadBtn: '📥 Unduh Langsung (offline)' };
+                const map = { confirmDownloadBtn: '⬇️ Unduh ke Google Drive', byseDownloadBtn: '🎬 Byse (via API)', directDownloadBtn: '📥 Unduh Langsung (offline)' };
                 Object.keys(map).forEach(id => { const b = document.getElementById(id); if (b) { b.disabled = false; b.innerText = map[id]; b.classList.remove('opacity-50', 'cursor-not-allowed'); } });
             }
 
             async function confirmDownload(destination) {
                 if (!currentTaskId || !sessionToken) return;
                 setActionButtonsDisabled(true);
-                const busyLabel = { drive: '⏳ Menyiapkan unduhan...', dood: '⏳ Mengirim ke DoodStream...', direct: '⏳ Menyiapkan unduhan langsung...' };
+                const busyLabel = { drive: '⏳ Menyiapkan unduhan...', byse: '⏳ Mengirim ke Byse...', direct: '⏳ Menyiapkan unduhan langsung...' };
                 document.getElementById('confirmDownloadBtn').innerText = busyLabel[destination] || '⏳ Menyiapkan...';
 
                 const progressPanel = document.getElementById('progressPanel');
                 progressPanel.classList.remove('hidden');
                 document.getElementById('pSpinner').classList.remove('hidden');
                 document.getElementById('pStatus').className = "font-medium bg-[#0F172A] text-[#94A3B8] px-3 py-1.5 rounded-lg border border-[#334155] inline-block truncate";
-                const msg = { drive: 'Melanjutkan unduhan penuh — progres tidak di-reset...', dood: 'Mengunggah ke DoodStream (via API)...', direct: 'Menyiapkan unduhan langsung (offline)...' };
+                const msg = { drive: 'Melanjutkan unduhan penuh — progres tidak di-reset...', byse: 'Mengunggah ke Byse (via API)...', direct: 'Menyiapkan unduhan langsung (offline)...' };
                 document.getElementById('pStatus').innerText = msg[destination] || 'Memproses...';
                 document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> Konfirmasi diterima — memproses tujuan unduhan...</div>';
                 document.getElementById('previewPanel').classList.remove('hidden');
@@ -746,7 +746,7 @@ document.getElementById('pStatus').innerText = '✅ Preview ditemukan — pilih 
             }
 
             document.getElementById('confirmDownloadBtn').addEventListener('click', () => confirmDownload('drive'));
-            document.getElementById('doodDownloadBtn').addEventListener('click', () => confirmDownload('dood'));
+            document.getElementById('byseDownloadBtn').addEventListener('click', () => confirmDownload('byse'));
             document.getElementById('directDownloadBtn').addEventListener('click', () => confirmDownload('direct'));
             
             // ===== RESET: dialog konfirmasi → HARD RESET murni =====
@@ -847,7 +847,7 @@ document.getElementById('pStatus').innerText = '✅ Preview ditemukan — pilih 
                             ? `/api/thumbnail/${encodeURIComponent(item.name)}?session_token=${encodeURIComponent(token)}` 
                             : '';
                         let thumbHtml = thumbSrc ? `<img src="${thumbSrc}" class="w-full h-full object-cover group-hover:scale-110 transition duration-500">` : '<div class="text-2xl h-full w-full flex items-center justify-center">📄</div>';
-                        const doodUrl = item.dood_url || '';
+                        const byseUrl = item.byse_url || '';
                         
                         return `<div class="history-item group relative flex items-center gap-4 p-3.5 bg-[#1E293B] hover:bg-[#283548] border border-[#334155] hover:border-[#475569] rounded-xl transition-all shadow-sm" data-name="${safeName}" data-status="${item.status}">
                             <div class="w-16 h-14 rounded-lg bg-black border border-[#475569] overflow-hidden shrink-0 relative">${thumbHtml}</div>
@@ -873,8 +873,8 @@ document.getElementById('pStatus').innerText = '✅ Preview ditemukan — pilih 
                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
                                 </a>
                                 ` : ''}
-                                ${isSuccess && doodUrl ? `
-                                <a href="${escapeHtml(doodUrl)}" target="_blank" class="w-9 h-9 flex items-center justify-center rounded-full bg-amber-950/40 text-amber-400 hover:bg-amber-600 hover:text-white transition-all shadow border border-transparent hover:border-amber-500" title="Buka link DoodStream / Streaming via API">
+                                ${isSuccess && byseUrl ? `
+                                <a href="${escapeHtml(byseUrl)}" target="_blank" class="w-9 h-9 flex items-center justify-center rounded-full bg-amber-950/40 text-amber-400 hover:bg-amber-600 hover:text-white transition-all shadow border border-transparent hover:border-amber-500" title="Buka link Byse / Streaming via API">
                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M7 16V4m0 0L3 8m4-4l4 4m6 4v6m0 0l-4-4m4 4l4-4"></path></svg>
                                 </a>
                                 ` : ''}
@@ -1208,7 +1208,7 @@ document.getElementById('pStatus').innerText = '✅ Preview ditemukan — pilih 
                     document.getElementById('pBar').style.width = '100%';
                     document.getElementById('pPercent').innerText = '100%';
                     document.getElementById('pStatus').className = "font-bold bg-[#052e16] text-emerald-300 px-3 py-1.5 rounded-lg border border-[#166534] inline-block truncate";
-                    document.getElementById('pStatus').innerText = '✅ Preview ditemukan — pilih tujuan unduhan (Google Drive / Doodstream / Langsung)';
+                    document.getElementById('pStatus').innerText = '✅ Preview ditemukan — pilih tujuan unduhan (Google Drive / Byse / Langsung)';
                     document.getElementById('pSpinner').classList.add('hidden');
                     document.getElementById('pMeta').innerText = 'Preview menunggu konfirmasi';
                     document.getElementById('logBox').innerHTML = '<div class="text-gray-500">> Memulihkan sesi terakhir — polling berlanjut tiap 2 detik...</div>';
