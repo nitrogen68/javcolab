@@ -118,10 +118,10 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                                 </div>
                             </div>
                         </div>
-                        <div class="grid grid-cols-1 min-[480px]:grid-cols-3 gap-2 mt-3 items-stretch">
-                            <button id="confirmDownloadBtn" class="px-2 py-3 min-w-0 text-center leading-tight bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 text-white font-bold rounded-xl shadow-lg shadow-emerald-900/30">⬇️ Unduh ke Google Drive</button>
-                            <button id="doodDownloadBtn" class="px-2 py-3 min-w-0 text-center leading-tight bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-700 hover:to-amber-600 text-white font-bold rounded-xl shadow-lg shadow-orange-900/30">🎬 Doodstream (via API)</button>
-                            <button id="directDownloadBtn" class="px-2 py-3 min-w-0 text-center leading-tight bg-gradient-to-r from-sky-600 to-cyan-500 hover:from-sky-700 hover:to-cyan-600 text-white font-bold rounded-xl shadow-lg shadow-sky-900/30">📥 Unduh Langsung (offline)</button>
+                        <div class="grid grid-cols-3 gap-1 sm:gap-2 mt-3 items-stretch">
+                            <button id="confirmDownloadBtn" class="px-1 sm:px-2 py-3 min-w-0 text-[10px] sm:text-sm text-center leading-tight bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 text-white font-bold rounded-xl shadow-lg shadow-emerald-900/30">⬇️ Unduh<br class="sm:hidden"> ke Google Drive</button>
+                            <button id="doodDownloadBtn" class="px-1 sm:px-2 py-3 min-w-0 text-[10px] sm:text-sm text-center leading-tight bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-700 hover:to-amber-600 text-white font-bold rounded-xl shadow-lg shadow-orange-900/30">🎬 Doodstream<br class="sm:hidden"> (via API)</button>
+                            <button id="directDownloadBtn" class="px-1 sm:px-2 py-3 min-w-0 text-[10px] sm:text-sm text-center leading-tight bg-gradient-to-r from-sky-600 to-cyan-500 hover:from-sky-700 hover:to-cyan-600 text-white font-bold rounded-xl shadow-lg shadow-sky-900/30">📥 Unduh<br class="sm:hidden"> Langsung</button>
                         </div>
                         <button id="resetBtn" class="mt-2 w-full sm:w-auto px-6 h-11 bg-gradient-to-r from-red-600 to-orange-500 hover:from-red-700 hover:to-orange-600 text-white font-bold rounded-xl shadow-lg shadow-red-900/30">🔄 Reset & Mulai Tugas Baru</button>
                     </div>

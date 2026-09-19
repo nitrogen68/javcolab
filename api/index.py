@@ -53,6 +53,77 @@ def _normalize_gdrive_folder(raw=None):
 
 GDRIVE_FOLDER=_normalize_gdrive_folder(os.environ.get("GDRIVE_FOLDER","javColab"))
 
+# DoodStream (via API): key disuntik lewat env GitHub Actions (secrets.DOOD_API_KEY).
+# Alur remote upload: endpoint upload/url meminta DoodStream MENARIK file dari URL
+# CDN → urlupload/status memantau antrean → file/info mengembalikan download_url.
+# Dijalankan dari BACKEND (tidak bergantung worker), dengan fallback worker bila
+# remote pull ditolak (mis. terjeda jam sibuk / CDN token kedaluwarsa).
+DOOD_API_KEY=os.environ.get("DOOD_API_KEY","")
+DOOD_API_BASE="https://doodapi.co/api"
+
+def _dood_get(path,params):
+    if not DOOD_API_KEY:
+        raise ValueError("DOOD_API_KEY belum disediakan di lingkungan ini")
+    q=dict(params or {});q["key"]=DOOD_API_KEY
+    r=requests.get(f"{DOOD_API_BASE}/{path}",params=q,timeout=120)
+    r.raise_for_status()
+    j=r.json()
+    if int(j.get("status") or j.get("status_code") or 0)!=200:
+        return {}
+    res=j.get("result") or j
+    if isinstance(res,dict) and "status" in res and int(res.get("status") or 0)==400:
+        return {}
+    return res
+
+def dood_remote_upload(url,title=""):
+    """DoodStream menarik {url} (CDN mp4) ke akun. Return (filecode, msg, raw)."""
+    try:
+        res=_dood_get("upload/url",{"url":url,"title":title or ""})
+    except Exception as e:
+        raise ValueError(f"[dood upload/url] {e}")
+    raws=res if isinstance(res,dict) else {}
+    fc=raws.get("filecode") or raws.get("file_code") or ""
+    msg=raws.get("msg") or raws.get("message") or raws.get("status_msg") or ""
+    return str(fc).strip(),str(msg),raws
+
+def dood_upload_status(fc):
+    """Cek antrean remote upload. Return (status, raw) — status: working/.../error atau sukses."""
+    try:
+        res=_dood_get("urlupload/status",{"file_code":fc})
+    except Exception as e:
+        raise ValueError(f"[dood urlupload/status] {e}")
+    rows=res if isinstance(res,list) else (res.get("rows") if isinstance(res,dict) else [])
+    for row in rows if isinstance(rows,list) else []:
+        rid=(row.get("file_code") or row.get("filecode") or "")
+        if rid==fc:
+            return str(row.get("status") or "working"),row
+    return "working",res
+
+def dood_file_info(fc):
+    """Setelah remote upload selesai — minta download_url permanen dari file/info."""
+    try:
+        res=_dood_get("file/info",{"file_code":fc})
+    except Exception as e:
+        raise ValueError(f"[dood file/info] {e}")
+    raws=res if isinstance(res,dict) else {}
+    url=raws.get("download_url") or ""
+    if not url and isinstance(res,list) and res:
+        url=(res[0] or {}).get("download_url") or ""
+    return str(url).strip(),raws
+
+def dood_search_files(title,length=30):
+    """Cari file yang sudah pernah ter-remote-upload ke akun (fallback link permanen)."""
+    try:
+        res=_dood_get("file/search",{"search_term":title or "","length":length})
+        rows=res if isinstance(res,list) else (res.get("rows") if isinstance(res,dict) else [])
+        for row in rows if isinstance(rows,list) else []:
+            rid=(row.get("file_code") or row.get("filecode") or "")
+            if rid:
+                return rid,row
+    except Exception:
+        pass
+    return "",{}
+
 
 def _db_ready():
     try:init_db();return True
@@ -493,28 +564,53 @@ def confirm_download(req:ConfirmRequest):
     dest=str(req.destination or "").lower().strip() or "drive"
     if dest not in ("drive","dood","direct"):
         raise HTTPException(status_code=400,detail=f"destination tidak dikenal: {dest}")
-    if current.get("confirmed"):
-        if dest=="dood" and (meta.get("dood") or {}).get("filecode"):
-            return {"status":"already_confirmed","task_id":tid,"current_status":current.get("status"),"destination":"dood","file_code":(meta.get("dood") or {}).get("filecode")}
+    # Sudah pernah dikonfirmasi / sedang diproses backend → jangan dobel kerja.
+    dood_meta=meta.get("dood") or {}
+    if dood_meta.get("filecode") or current.get("confirmed"):
+        if dest=="dood" and dood_meta.get("filecode"):
+            return {"status":"already_confirmed","task_id":tid,"current_status":current.get("status"),"destination":"dood","file_code":dood_meta.get("filecode")}
         return {"status":"already_confirmed","task_id":tid,"current_status":current.get("status"),"destination":meta.get("destination") or dest}
-    meta=dict(meta);meta["confirmed"]=True;meta["mode"]="download";meta["destination"]=dest
+    meta=dict(meta);meta["mode"]="download";meta["destination"]=dest
     if dest=="dood":
         cdn=meta.get("cdn","")
         if not cdn:
             raise HTTPException(status_code=400,detail="Link CDN belum tersedia — jalankan mode Google Drive dulu atau ulangi pencarian")
-        patch_task_meta(tid,meta)
-        add_log(tid,"🎬 Doodstream (via API): worker mengirim URL CDN ke DoodStream via upload/url (fallback: upload lokal dari runner).")
-        update_task(tid,meta=meta,session_token=req.session_token,status="Mengunggah ke DoodStream (via API)...",message="Mengunggah ke akun DoodStream Anda...",progress=15)
-        return {"status":"confirmed","task_id":tid,"confirmed":True,"destination":"dood"}
+        title=str(meta.get("clean_title") or meta.get("title") or "")
+        # (1) Remote upload via API DoodStream, langsung dari BACKEND. confirmed TIDAK
+        # di-set agar worker lama (pra-fitur) tidak meneruskan ke Google Drive; bila
+        # backend menerima CDN, warga cukup di-poll urlupload/status lalu selesai.
+        try:
+            fc,msg,raw=dood_remote_upload(cdn,title)
+        except Exception as e:
+            fc="";msg=str(e);raw={}
+        if fc:
+            meta["dood"]={"filecode":fc,"title":title,"status":"working","msg":msg,"bytes_downloaded":0,"bytes_total":0,"last_poll":0}
+            meta["confirmed"]=False
+            update_task(tid,meta=meta,session_token=req.session_token,status="Mengunggah ke DoodStream (via API)...",message="DoodStream sedang menarik file dari CDN...",progress=5)
+            add_log(tid,f"🎬 Doodstream (via API): DoodStream menerima CDN link → file_code {fc}. Response: {json.dumps(raw,ensure_ascii=False)[:500]}")
+            return {"status":"confirmed","task_id":tid,"confirmed":False,"destination":"dood","file_code":fc}
+        # (2) Remote ditolak → percobaan cepat via file/search; bila kosong, worker
+        # menangani fallback (retry remote + upload lokal dari runner).
+        found_code,_fd=dood_search_files(title) if title else ("",{})
+        if found_code:
+            meta["dood"]={"filecode":found_code,"title":title,"status":"done","msg":"found existing","download_url":_fd.get("download_url",""),"last_poll":0}
+            meta["confirmed"]=False
+            update_task(tid,meta=meta,session_token=req.session_token,status="Selesai",message="File sudah ada di akun DoodStream Anda.",progress=100)
+            add_log(tid,f"🎬 Doodstream (via API): file ditemukan di akun (file_code {found_code}) — tidak perlu upload ulang.")
+            return {"status":"confirmed","task_id":tid,"confirmed":False,"destination":"dood","file_code":found_code}
+        meta["dood"]={"remote_failed":True,"msg":msg or "upload/url ditolak"}
+        meta["confirmed"]=True
+        update_task(tid,meta=meta,session_token=req.session_token,status="Mengunggah ke DoodStream (via API)...",message="Fallback worker: upload DoodStream ...",progress=10)
+        add_log(tid,f"🚫 Doodstream (via API): upload/url ditolak ({msg or 'no response'}). Worker menangani fallback: retry remote, lalu upload lokal dari runner.")
+        return {"status":"confirmed","task_id":tid,"confirmed":True,"destination":"dood","fallback":"worker"}
     if dest=="direct":
         cdn=meta.get("cdn","")
         if not cdn:
             raise HTTPException(status_code=400,detail="Link CDN belum tersedia — jalankan mode Google Drive dulu atau ulangi pencarian")
-        meta["direct_url"]=cdn
-        patch_task_meta(tid,meta)
-        add_log(tid,"📥 Unduh langsung (offline): link CDN mp4 dikirim ke browser Anda.")
+        meta["direct_url"]=cdn;meta["confirmed"]=False
         update_task(tid,meta=meta,session_token=req.session_token,status="Selesai",message="Unduhan langsung dibuka di browser Anda (offline file).",progress=100)
-        return {"status":"confirmed","task_id":tid,"confirmed":True,"destination":"direct","url":cdn}
+        add_log(tid,"📥 Unduh langsung (offline): link CDN mp4 dikirim ke browser Anda.")
+        return {"status":"confirmed","task_id":tid,"confirmed":False,"destination":"direct","url":cdn}
     meta=dict(meta);meta["confirmed"]=True;meta["mode"]="download";meta["destination"]="drive"
     update_task(tid,meta=meta,session_token=req.session_token,status="Memproses unduhan...",message="Konfirmasi diterima — mendownload penuh...",progress=20)
     add_log(tid,"✅ Konfirmasi diterima — worker melanjutkan unduh penuh tanpa restart.")
@@ -560,6 +656,41 @@ def get_progress(task_id:str):
     out["drive_file_id"]=meta.get("drive_file_id","")
     out["dood_url"]=meta.get("dood_url","")
     out["dood"]=meta.get("dood") or {}
+    # LAZY DOOD RESOLVE: remote upload dijalankan BACKEND (tujuan dood, tanpa
+    # confirmed) → urlupload/status di-poll throttled (≥25dtk) sampai selesai,
+    # lalu file/info diambil untuk download_url permanen. Status di UI berjalan
+    # real-time tanpa worker idle.
+    if out["destination"]=="dood" and not out["confirmed"] and not out["direct_url"]:
+        dd=out["dood"] or {}
+        fc=dd.get("filecode","")
+        st=dd.get("status","")
+        if fc and st=="working":
+            now=time.time();last=float(dd.get("last_poll") or 0)
+            if now-last>=25:
+                dd=dict(dd);dd["last_poll"]=now
+                try:patch_task_meta(t.get("task_id") or task_id,{"dood":dd})
+                except Exception:pass
+                try:
+                    pst,raw=dood_upload_status(fc)
+                    if pst in ("success","done","selesai","komplit","finished","complete"):
+                        url,_inf=dood_file_info(fc)
+                        dd["status"]="done";dd["download_url"]=url;dd["last_poll"]=now
+                        try:patch_task_meta(t.get("task_id") or task_id,{"dood":dd,"dood_url":url})
+                        except Exception:pass
+                        update_task(task_id,status="Selesai",message="Upload ke DoodStream selesai.",progress=100)
+                        add_log(task_id,f"🎬 Doodstream (via API): upload selesai — {url}")
+                    elif pst in ("error","failed","gagal","expired","canceled"):
+                        dd["status"]="error"
+                        try:patch_task_meta(t.get("task_id") or task_id,{"dood":dd})
+                        except Exception:pass
+                        add_log(task_id,f"🚫 Doodstream (via API): remote upload {pst}. {json.dumps(raw,ensure_ascii=False)[:300]}")
+                        update_task(task_id,status="Gagal",message="DoodStream remote upload gagal — coba lagi atau gunakan Google Drive.",progress=100)
+                    # 'working' → biarkan; poll berikutnya akan mencoba lagi
+                except Exception as e:
+                    add_log(task_id,f"[dood poll skip] {e}")
+        if dd.get("status")=="done":
+            out["dood"]=dd
+            out["status"]="Selesai";out["percent"]=100
     github=dict(meta.get("github") or {})
     # LAZY RUN RESOLUTION: right setelah workflow_dispatch HTTP 204, GitHub belum
     # mencatat run-nya sehingga resolve di _launch_task sering gagal. Di sini run

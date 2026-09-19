@@ -837,6 +837,21 @@ def wait_for_confirmation(timeout=WAIT_CONFIRM_TIMEOUT):
         if bool(st.get("confirmed")):
             log("✅ Konfirmasi unduhan diterima — melanjutkan unduh penuh di run yang sama.")
             return True
+        # Tujuan selain Google Drive ditangani BACKEND (DoodStream via API /
+        # unduh langsung). confirmed sengaja TIDAK di-set backend → worker pulang
+        # cepat tanpa menunggu timeout DAN tanpa lanjut ke Google Drive.
+        dest = str(st.get("destination") or "").lower()
+        if dest == "direct" and st.get("direct_url"):
+            log("📥 Tujuan 'direct' diproses backend (link CDN dikirim ke browser) — worker selesai.")
+            return False
+        if dest == "dood":
+            dd = st.get("dood") or {}
+            if dd.get("filecode") or dd.get("status") == "working":
+                log("🎬 Tujuan 'dood' diproses backend (DoodStream remote upload) — worker selesai.")
+                return False
+            if bool(st.get("confirmed")):
+                log("🔄 Dood remote ditolak backend — fallback worker (retry + upload lokal).")
+                return True
         remaining = int(deadline - time.time())
         if remaining > 0 and remaining % 60 == 0:
             log(f"⏳ Menunggu konfirmasi unduhan... (sisa {remaining // 60} menit)")
