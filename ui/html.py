@@ -456,9 +456,7 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 };
                 const pushLog = (l, idx) => {
                     const msg = toMsg(l);
-                    // Hanya render log yang sudah sukses (✅). Baris dengan status
-                    // pending / jam pasir (⏳) atau sedang berjalan (🔄) di-skip.
-                    if (!/✅/.test(String(msg)) || /[⏳🔄]/.test(String(msg))) return;
+                    if (msg === undefined || msg === null || msg === '') return;
                     const key = (l && (l.id || l.id === 0)) ? 'log:' + l.id : 'log:' + idx + ':' + ((l && l.ts) || 0) + ':' + msg;
                     emit(key, `<div>> ${escapeHtml(msg)}</div>`);
                 };
@@ -476,18 +474,37 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                 }
 
                 if (stepsBase.length) {
-                    // Hanya render step yang sudah sukses (✅). Step yang masih
-                    // pending (⏳) / sedang berjalan (🔄) TIDAK ditampilkan di awal,
-                    // hanya muncul begitu benar-benar selesai (status completed + success),
-                    // diurut sesuai urutan kemunculan workflow.
-                    const done = stepsBase.filter(s => s.status === 'completed' && s.conclusion === 'success');
-                    const total = done.length;
-                    let doneIdx = 0;
+                    // Streaming step SATU-PERSATU sesuai progres nyata: step yang
+                    // masih queued disembunyikan, step yang berjalan (in_progress)
+                    // ditampilkan 🔄, dan setelah selesai di-update in-place jadi
+                    // ✅ (sukses) / ⏭️ (skip) / ❌ (gagal). Penomoran [i/total]
+                    // mengikuti urutan workflow sebenarnya (mis. [9/9] Run Puppeter).
+                    const total = stepsBase.length;
                     stepsBase.forEach((s, i) => {
-                        if (s.status !== 'completed' || s.conclusion !== 'success') return;
-                        emit('step:' + i + ':' + (s.name || ''), `<div class="gh-step">>   ✅ [${doneIdx + 1}/${total}] ${escapeHtml(s.name || '')}</div>`);
-                        doneIdx += 1;
+                        const status = s.status || '';
+                        if (status !== 'in_progress' && status !== 'completed') return;
+                        let mark;
+                        let suffix = '';
+                        if (status === 'in_progress') {
+                            mark = '🔄';
+                            suffix = ' — sedang berjalan...';
+                        } else {
+                            const c = s.conclusion || '';
+                            mark = c === 'success' ? '✅' : (c === 'skipped' || c === 'cancelled' ? '⏭️' : '❌');
+                        }
+                        emit('step:' + i + ':' + (s.name || ''), `<div class="gh-step">>   ${mark} [${i + 1}/${total}] ${escapeHtml(s.name || '')}${suffix}</div>`);
                     });
+                }
+
+                // Baris indikator tunggu hasil (⏳): muncul HANYA setelah step worker
+                // (step terakhir, mis. "Run Puppeter / Playwright") mulai berjalan —
+                // bukan di tengah-tengah steps. Hilang otomatis (prune) begitu run
+                // mencapai status completed pada poll berikutnya.
+                if (runStatus === 'in_progress' && stepsBase.length > 0) {
+                    const lastStep = stepsBase[stepsBase.length - 1];
+                    if (lastStep && lastStep.status === 'in_progress') {
+                        emit('poll:result', `<div class="gh-line">> ⏳ Polling result dari GitHub Actions / Redis...</div>`);
+                    }
                 }
 
                 post.forEach((l, i) => pushLog(l, i));
@@ -544,6 +561,15 @@ def get_full_ui(app_version, modals_html, is_dev=False):
                         const btn = document.getElementById('submitBtn');
 
                         if (d.status === 'preview_ready') {
+                            // Result tidak langsung muncul: tunggu sampai baris detail
+                            // media ("🖼️ Preview: ...") benar-benar tampil di logBox
+                            // (streaming/flush selesai). Jika belum, lanjut polling.
+                            const logBoxNow = document.getElementById('logBox');
+                            const mediaShown = logBoxNow && /🖼️\s*Preview:/.test(logBoxNow.textContent || '');
+                            if (!mediaShown) {
+                                document.getElementById('pStatus').innerText = 'Menunggu detail media tampil di terminal...';
+                                return;
+                            }
                             clearInterval(pollTimer);
                             isDownloading = false;
                             document.getElementById('pBar').style.width = '100%';
