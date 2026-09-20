@@ -327,7 +327,7 @@ def run_byse_destination(cdn, page_url, title, session_token):
     # Segarkan CDN dulu (token baru). CDN playmogo/fast-stream diberi token+kedaluwarsa
     # pendek — token lama membuat remote pull "putus di tengah" (kasus user barusan).
     try:
-        fresh, _ft, _fp = asyncio.new_event_loop().run_until_complete(sniper_extract_cdn(page_url))
+        fresh, _ft, _fp, _m = asyncio.new_event_loop().run_until_complete(sniper_extract_cdn(page_url))
         if fresh:
             cdn = fresh
             log("🔄 CDN di-refresh (token baru) agar remote/unduh tidak putus di tengah.")
@@ -559,11 +559,40 @@ def search_123av(keyword):
     return f"https://123av.com/id/v/{slug}"
 
 
+async def _browser_probe_size(ctx, cdn, referer):
+    """Ukuran file via konteks browser (REQUEST yang SUDAH lolos WAF/cookie):
+    HEAD → fallback Range bytes=0-0 (baca content-range). Return '—' bila tak bisa."""
+    try:
+        hdrs = {"User-Agent": "Mozilla/5.0", "Referer": referer or ""}
+        m = None
+        try:
+            r = await ctx.request.head(cdn, headers=hdrs, timeout=20000)
+            m = r.headers.get("content-length")
+        except Exception:
+            m = None
+        if not m:
+            try:
+                r = await ctx.request.fetch(cdn, method="GET",
+                                            headers={**hdrs, "Range": "bytes=0-0"},
+                                            timeout=20000)
+                cr = r.headers.get("content-range") or ""
+                if "/" in cr:
+                    m = cr.rsplit("/", 1)[-1]
+            except Exception:
+                m = None
+        if m and m.isdigit() and int(m) > 0:
+            return format_size(int(m))
+    except Exception:
+        pass
+    return "—"
+
+
 async def sniper_extract_cdn(target_url):
     from playwright.async_api import async_playwright
     captured = []
     final_cdn = None
     translated_title = ""
+    meta = {}
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True,
@@ -643,10 +672,44 @@ async def sniper_extract_cdn(target_url):
                 else:
                     final_cdn = streams[0]
             log("Progres sedang berlangsung: 100%")
+
+            # Metadata in-browser (sesi sudah lolos WAF): thumbnail, durasi video
+            # aktual dari <video>, dan size CDN via HEAD/Range browser.
+            try:
+                js = await page.evaluate("""() => {
+                    const v = document.querySelector('video');
+                    const og = document.querySelector('meta[property="og:image"], meta[name="og:image"]');
+                    const md = document.querySelector('meta[property="video:duration"], meta[name="video:duration"]');
+                    return {
+                        thumb: (og && og.content) || (v && v.poster) || '',
+                        duration: (v && !isNaN(v.duration) && v.duration > 0) ? v.duration
+                                  : (md && parseFloat(md.content)) || null
+                    };
+                }""")
+                if js.get("thumb"):
+                    meta["thumb"] = js["thumb"]
+                dur = js.get("duration")
+                if not dur:
+                    for _ in range(6):
+                        dur = await page.evaluate("""() => {
+                            const v = document.querySelector('video');
+                            return (v && !isNaN(v.duration) && v.duration > 0) ? v.duration : null;
+                        }""")
+                        if dur:
+                            break
+                        await page.wait_for_timeout(1000)
+                if dur:
+                    hh, rem = divmod(int(dur), 3600)
+                    mi, ss = divmod(rem, 60)
+                    meta["duration"] = f"{hh}:{mi:02d}:{ss:02d}"
+            except Exception:
+                pass
+            if final_cdn:
+                meta["size"] = await _browser_probe_size(ctx, final_cdn, target_url)
             await browser.close()
     except Exception as e:
         log(f"❌ Error Sniper: {str(e)}")
-    return final_cdn, translated_title, target_url
+    return final_cdn, translated_title, target_url, meta
 
 
 def clean_filename(translated_title, fallback_url):
@@ -867,59 +930,69 @@ def probe_media_duration(cdn, referer=None):
     return ""
 
 
-def fetch_preview_metadata(page_url, cdn, title):
-    """Scrape metadata untuk preview TANPA mengunduh penuh:
-    thumb (og:image / video poster), size (HEAD/Range CDN — intip header saja),
-    duration (ffprobe; fallback durasi dari meta halaman)."""
-    preview = {"title": title or "", "filename": "", "thumb": "", "size": "—", "duration": ""}
+def fetch_preview_metadata(page_url, cdn, title, meta=None):
+    """Scrape metadata untuk preview TANPA mengunduh penuh.
+    Prioritas: hasil in-browser (meta dari sesi Playwright yang sudah lolos WAF) →
+    fallback requests+ffprobe untuk nilai yang masih kosong."""
+    meta = meta or {}
+    preview = {"title": title or "", "filename": "",
+               "thumb": meta.get("thumb", "") or "",
+               "size": meta.get("size", "") or "—",
+               "duration": meta.get("duration", "") or ""}
     html_dur = ""
-    try:
-        r = requests.get(page_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20, verify=False)
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.text, "html.parser")
-            og = (soup.find("meta", property="og:image")
-                  or soup.find("meta", attrs={"name": "og:image"}))
-            if og and og.get("content"):
-                preview["thumb"] = og["content"]
-            if not preview["thumb"]:
-                vid = soup.find("video")
-                if vid and vid.get("poster"):
-                    preview["thumb"] = vid["poster"]
-            dur = None
-            m = (soup.find("meta", property="video:duration")
-                 or soup.find("meta", attrs={"name": "video:duration"}))
-            if m and m.get("content"):
-                try:
-                    dur = int(float(m["content"]))
-                except Exception:
+    misses = [k for k in ("thumb", "size", "duration") if not preview[k] or preview[k] == "—"]
+
+    if "thumb" in misses or "duration" in misses:
+        try:
+            r = requests.get(page_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20, verify=False)
+            if r.status_code == 200:
+                soup = BeautifulSoup(r.text, "html.parser")
+                if "thumb" in misses:
+                    og = (soup.find("meta", property="og:image")
+                          or soup.find("meta", attrs={"name": "og:image"}))
+                    if og and og.get("content"):
+                        preview["thumb"] = og["content"]
+                    if not preview["thumb"]:
+                        vid = soup.find("video")
+                        if vid and vid.get("poster"):
+                            preview["thumb"] = vid["poster"]
+                if "duration" in misses:
                     dur = None
-            if dur is None:
-                for pat in [r"(\d{1,2}):(\d{2}):(\d{2})", r"(\d{1,2})\s*(?:j[au]m)?\s*(\d{2})\s*(?:m[ae]n?it)?\s*(\d{2})\s*s",
-                            r"\b(\d{1,2}):(\d{2})\b(?!:)"]:
-                    mm = re.search(pat, r.text)
-                    if mm:
+                    m = (soup.find("meta", property="video:duration")
+                         or soup.find("meta", attrs={"name": "video:duration"}))
+                    if m and m.get("content"):
                         try:
-                            g = mm.groups()
-                            if len(g) == 3:
-                                hh, mi, ss = (int(x) for x in g)
-                            else:
-                                hh, mi, ss = 0, int(g[0]), int(g[1])
-                            dur = hh * 3600 + mi * 60 + ss
+                            dur = int(float(m["content"]))
                         except Exception:
                             dur = None
-                        if dur:
-                            break
-            if dur:
-                hh, rem = divmod(dur, 3600)
-                mi, ss = divmod(rem, 60)
-                html_dur = f"{hh}:{mi:02d}:{ss:02d}"
-    except Exception as e:
-        log(f"⚠️ Preview metadata error: {e}")
+                    if dur is None:
+                        for pat in [r"(\d{1,2}):(\d{2}):(\d{2})", r"(\d{1,2})\s*(?:j[au]m)?\s*(\d{2})\s*(?:m[ae]n?it)?\s*(\d{2})\s*s",
+                                    r"\b(\d{1,2}):(\d{2})\b(?!:)"]:
+                            mm = re.search(pat, r.text)
+                            if mm:
+                                try:
+                                    g = mm.groups()
+                                    if len(g) == 3:
+                                        hh, mi, ss = (int(x) for x in g)
+                                    else:
+                                        hh, mi, ss = 0, int(g[0]), int(g[1])
+                                    dur = hh * 3600 + mi * 60 + ss
+                                except Exception:
+                                    dur = None
+                                if dur:
+                                    break
+                    if dur:
+                        hh, rem = divmod(dur, 3600)
+                        mi, ss = divmod(rem, 60)
+                        html_dur = f"{hh}:{mi:02d}:{ss:02d}"
+        except Exception as e:
+            log(f"⚠️ Preview metadata error: {e}")
     if cdn:
-        preview["size"] = peek_media_size(cdn, page_url)
-        duration = probe_media_duration(cdn, page_url)
-        preview["duration"] = duration or html_dur
-    else:
+        if "size" in misses:
+            preview["size"] = peek_media_size(cdn, page_url)
+        if "duration" in misses:
+            preview["duration"] = probe_media_duration(cdn, page_url) or html_dur
+    elif not preview["duration"]:
         preview["duration"] = html_dur
     return preview
 
@@ -1068,7 +1141,7 @@ def run():
         raise Exception("Regex Mismatch Error!")
 
     log("🔗 Mengakses halaman utama")
-    cdn, title, page_url = asyncio.new_event_loop().run_until_complete(sniper_extract_cdn(actual))
+    cdn, title, page_url, meta = asyncio.new_event_loop().run_until_complete(sniper_extract_cdn(actual))
     if not cdn:
         raise Exception("Gagal membongkar link CDN video.")
 
@@ -1085,7 +1158,7 @@ def run():
 
     if is_preview:
         # MODE PREVIEW: scrape metadata SAJA, jangan unduh penuh.
-        preview = fetch_preview_metadata(page_url, cdn, title)
+        preview = fetch_preview_metadata(page_url, cdn, title, meta)
         preview["filename"] = fname
         log(f"🖼️ Preview: {fname} | size={preview['size']} | durasi={preview['duration'] or '—'}")
         report({
