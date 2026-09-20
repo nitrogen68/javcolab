@@ -847,13 +847,23 @@ def probe_media_duration(cdn, referer=None):
         cmd += [cdn]
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
         s = out.stdout.strip()
-        dur = float(s)
+        if not s:
+            # ffprobe makan 200/redirect tapi tak bisa baca durasi (CDN kunci /
+            # playlist tidak probeable). Bukan error — pakai fallback meta halaman.
+            return ""
+        try:
+            dur = float(s)
+        except ValueError:
+            log(f"⚠️ Probe duration: output ffprobe bukan angka: {s[:60]!r}")
+            return ""
         if dur > 0:
             hh, rem = divmod(int(dur), 3600)
             mi, ss = divmod(rem, 60)
             return f"{hh}:{mi:02d}:{ss:02d}"
-    except Exception as e:
-        log(f"⚠️ Probe duration error: {e}")
+    except subprocess.TimeoutExpired as e:
+        log(f"⚠️ Probe duration timeout: {e}")
+    except OSError as e:
+        log(f"⚠️ ffprobe tidak tersedia atau gagal: {e}")
     return ""
 
 
@@ -884,11 +894,16 @@ def fetch_preview_metadata(page_url, cdn, title):
                 except Exception:
                     dur = None
             if dur is None:
-                for pat in [r"(\d{1,2}):(\d{2}):(\d{2})", r"(\d{1,2})\s*(?:j[au]m)?\s*(\d{2})\s*(?:m[ae]n?it)?\s*(\d{2})\s*s"]:
+                for pat in [r"(\d{1,2}):(\d{2}):(\d{2})", r"(\d{1,2})\s*(?:j[au]m)?\s*(\d{2})\s*(?:m[ae]n?it)?\s*(\d{2})\s*s",
+                            r"\b(\d{1,2}):(\d{2})\b(?!:)"]:
                     mm = re.search(pat, r.text)
                     if mm:
                         try:
-                            hh, mi, ss = (int(x) for x in mm.groups())
+                            g = mm.groups()
+                            if len(g) == 3:
+                                hh, mi, ss = (int(x) for x in g)
+                            else:
+                                hh, mi, ss = 0, int(g[0]), int(g[1])
                             dur = hh * 3600 + mi * 60 + ss
                         except Exception:
                             dur = None
