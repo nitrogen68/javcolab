@@ -749,10 +749,15 @@ async def sniper_extract_cdn(target_url):
                     const v = document.querySelector('video');
                     const og = document.querySelector('meta[property="og:image"], meta[name="og:image"]');
                     const md = document.querySelector('meta[property="video:duration"], meta[name="video:duration"]');
+                    let duration = null;
+                    if (v && v.duration && isFinite(v.duration) && v.duration > 0) {
+                        duration = v.duration;
+                    } else if (md && parseFloat(md.content)) {
+                        duration = parseFloat(md.content);
+                    }
                     return {
                         thumb: (og && og.content) || (v && v.poster) || '',
-                        duration: (v && !isNaN(v.duration) && v.duration > 0) ? v.duration
-                                  : (md && parseFloat(md.content)) || null
+                        duration: duration
                     };
                 }""")
                     if js.get("thumb"):
@@ -762,7 +767,7 @@ async def sniper_extract_cdn(target_url):
                         for _ in range(6):
                             dur = await page.evaluate("""() => {
                             const v = document.querySelector('video');
-                            return (v && !isNaN(v.duration) && v.duration > 0) ? v.duration : null;
+                            return (v && v.duration && isFinite(v.duration) && v.duration > 0) ? v.duration : null;
                         }""")
                             if dur:
                                 break
@@ -824,6 +829,16 @@ _META_SCAN_JS = """
         // video.poster
         const poster = doc.querySelector('video[poster]');
         if (poster && poster.poster && !results.thumb) results.thumb = poster.poster;
+        // video.duration (handle Infinity/NaN)
+        const v = doc.querySelector('video');
+        if (v && v.duration && isFinite(v.duration) && v.duration > 0) {
+            if (!results.duration) {
+                const hh = Math.floor(v.duration / 3600);
+                const mi = Math.floor((v.duration % 3600) / 60);
+                const ss = Math.floor(v.duration % 60);
+                results.duration = hh + ':' + String(mi).padStart(2, '0') + ':' + String(ss).padStart(2, '0');
+            }
+        }
     }
     return JSON.stringify(results);
 })();
