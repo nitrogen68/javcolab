@@ -34,6 +34,65 @@ CONFIRM_POLL_INTERVAL = 5
 BYSE_API_BASE = os.environ.get("BYSE_API_BASE", "https://api.byse.sx").rstrip("/")
 BYSE_API_KEY = os.environ.get("BYSE_API_KEY", "").strip()
 
+# MissAV mirrors & proxies - gunakan domain alternatif bila blocked
+# Format: comma-separated list, auto-test tiap domain hingga berhasil
+MISSAV_MIRRORS = [m.strip() for m in os.environ.get("MISSAV_MIRRORS", "").split(",") if m.strip()]
+# Fallback mirrors default (community-maintained)
+if not MISSAV_MIRRORS:
+    MISSAV_MIRRORS = [
+        "https://missav.ws",
+        "https://missav.com",
+        "https://missav.net",
+        "https://missav.tv",
+        "https://vidial.icu",
+        "https://missav.party",
+    ]
+
+
+def is_blocked_page(html):
+    """Deteksi halaman blokir (Internet Positif/Kominfo/Cloudflare WAF)."""
+    if not html:
+        return True
+    blocked_indicators = [
+        "internet positif",
+        "kominfo",
+        "di blokir",
+        "forbidden",
+        "content filtering",
+        "positive internet",
+        "attention required",
+        "access denied",
+        "just a moment",
+        "checking your browser",
+        "waf",
+    ]
+    h = html.lower()
+    return any(ind in h for ind in blocked_indicators)
+
+
+def fetch_with_mirror(url, timeout=15):
+    """Coba fetch URL dengan semua mirror yang tersedia. Return (html, final_url) atau (None, None)."""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
+    # Extract slug from original missav URL (e.g., /id/videos/fway-083 -> fway-083)
+    slug_match = re.search(r'/id/videos/([a-z0-9-]+)', url, re.IGNORECASE)
+    if not slug_match:
+        slug_match = re.search(r'/([a-z0-9-]+)$', url, re.IGNORECASE)
+    slug = slug_match.group(1) if slug_match else None
+    
+    for mirror in MISSAV_MIRRORS:
+        try:
+            if slug:
+                test_url = f"{mirror.rstrip('/')}/id/videos/{slug}"
+            else:
+                test_url = url
+            r = requests.get(test_url, headers=headers, timeout=timeout, verify=False)
+            if r.status_code == 200 and not is_blocked_page(r.text):
+                return r.text, test_url
+        except Exception:
+            continue
+    return None, None
+
 
 def _normalize_gdrive_folder(raw=None):
     """Normalisasi GDRIVE_FOLDER: hanya nama folder di root Drive.
@@ -493,28 +552,33 @@ def search_javtiful(keyword):
 
 
 def search_missav(keyword):
+    """Cari video MissAV dengan fallback mirror/proxy support.
+    MissAV sering ter blokir di Indonesia, gunakan domain mirror."""
     log(f"🔄 Alternatif 2 (MissAV): '{keyword}'...")
-    try:
-        slug = keyword.strip().lower().replace(" ", "-")
-        r = requests.get(f"https://missav.ws/id/search/{slug}",
-                         headers={"User-Agent": "Mozilla/5.0"}, timeout=15, verify=False)
-        if r.status_code != 200:
-            return None
-        soup = BeautifulSoup(r.text, "html.parser")
-        invalid = ["/search/", "/actresses/", "/genres/", "/makers/", "/series/", "/new",
-                   "/tags/", "/categories/", "english-subtitle", "uncensored", "/popular",
-                   "/monthly", "playlist"]
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if href.startswith("javascript") or href == "#" or "/id/" not in href:
-                continue
-            if any(x in href.lower() for x in invalid):
-                continue
-            full = href if href.startswith("http") else f"https://missav.ws{href}"
-            if validate_search_result(keyword, full):
-                log("🎯 Ditemukan (MissAV)"); return full
-    except Exception as e:
-        log(f"⚠️ MissAV error: {e}")
+    slug = keyword.strip().lower().replace(" ", "-")
+    search_url = f"https://missav.ws/id/search/{slug}"
+    
+    # Coba dengan mirror fallback jika primary blocked
+    html, final_url = fetch_with_mirror(search_url)
+    if not html:
+        log("⚠️ MissAV semua mirror blocked/tidak responsif")
+        return None
+    
+    soup = BeautifulSoup(html, "html.parser")
+    invalid = ["/search/", "/actresses/", "/genres/", "/makers/", "/series/", "/new",
+               "/tags/", "/categories/", "english-subtitle", "uncensored", "/popular",
+               "/monthly", "playlist"]
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.startswith("javascript") or href == "#" or "/id/" not in href:
+            continue
+        if any(x in href.lower() for x in invalid):
+            continue
+        full = href if href.startswith("http") else f"{final_url.rsplit('/', 1)[0]}{href}"
+        if validate_search_result(keyword, full):
+            log("🎯 Ditemukan (MissAV)")
+            return full
+    log("⚠️ MissAV: video tidak ditemukan di hasil pencarian")
     return None
 
 
@@ -675,8 +739,13 @@ async def sniper_extract_cdn(target_url):
 
             # Metadata in-browser (sesi sudah lolos WAF): thumbnail, durasi video
             # aktual dari <video>, dan size CDN via HEAD/Range browser.
-            try:
-                js = await page.evaluate("""() => {
+            # Untuk MissAV: gunakan _collect_page_meta untuk scan semua iframe
+            if "missav" in target_url.lower():
+                meta = await _collect_page_meta(page)
+                log(f"🔍 MissAV meta (iframe scan): {meta}")
+            else:
+                try:
+                    js = await page.evaluate("""() => {
                     const v = document.querySelector('video');
                     const og = document.querySelector('meta[property="og:image"], meta[name="og:image"]');
                     const md = document.querySelector('meta[property="video:duration"], meta[name="video:duration"]');
@@ -686,24 +755,24 @@ async def sniper_extract_cdn(target_url):
                                   : (md && parseFloat(md.content)) || null
                     };
                 }""")
-                if js.get("thumb"):
-                    meta["thumb"] = js["thumb"]
-                dur = js.get("duration")
-                if not dur:
-                    for _ in range(6):
-                        dur = await page.evaluate("""() => {
+                    if js.get("thumb"):
+                        meta["thumb"] = js["thumb"]
+                    dur = js.get("duration")
+                    if not dur:
+                        for _ in range(6):
+                            dur = await page.evaluate("""() => {
                             const v = document.querySelector('video');
                             return (v && !isNaN(v.duration) && v.duration > 0) ? v.duration : null;
                         }""")
-                        if dur:
-                            break
-                        await page.wait_for_timeout(1000)
-                if dur:
-                    hh, rem = divmod(int(dur), 3600)
-                    mi, ss = divmod(rem, 60)
-                    meta["duration"] = f"{hh}:{mi:02d}:{ss:02d}"
-            except Exception:
-                pass
+                            if dur:
+                                break
+                            await page.wait_for_timeout(1000)
+                    if dur:
+                        hh, rem = divmod(int(dur), 3600)
+                        mi, ss = divmod(rem, 60)
+                        meta["duration"] = f"{hh}:{mi:02d}:{ss:02d}"
+                except Exception as e:
+                    log(f"⚠️ Meta scan error: {e}")
             if final_cdn:
                 meta["size"] = await _browser_probe_size(ctx, final_cdn, target_url)
             await browser.close()
@@ -729,6 +798,54 @@ def format_size(b):
             return f"{b:.2f} {unit}"
         b /= 1024
     return f"{b:.2f} TB"
+
+
+# JavaScript untuk scan semua frame (top + iframe) - khusus MissAV CDN player
+_META_SCAN_JS = """
+// Cari semua metadata di semua frame
+(function() {
+    const results = { thumb: '', duration: '' };
+    const documents = [document];
+    // Scan semua iframe player
+    for (const frame of document.querySelectorAll('iframe')) {
+        try {
+            documents.push(frame.contentDocument || frame.contentWindow.document);
+        } catch(e) {}
+    }
+    // Di setiap frame, cari metadata
+    for (const doc of documents) {
+        if (!doc) continue;
+        // og:image
+        const og = doc.querySelector('meta[property="og:image"], meta[name="og:image"]');
+        if (og && og.content && !results.thumb) results.thumb = og.content;
+        // video:thumbnail/duration
+        const dur = doc.querySelector('meta[property="video:duration"], meta[name="video:duration"]');
+        if (dur && dur.content && !results.duration) results.duration = dur.content;
+        // video.poster
+        const poster = doc.querySelector('video[poster]');
+        if (poster && poster.poster && !results.thumb) results.thumb = poster.poster;
+    }
+    return JSON.stringify(results);
+})();
+"""
+
+
+async def _collect_page_meta(page):
+    """Scrape thumb & durasi dari SEMUA frames (top + iframe player).
+    Sesuai konvensi: og:image > video.poster > gambar; durasi dari <video>/.
+    metadata video:duration. Untuk MissAV: player berada di iframe terpisah."""
+    try:
+        # Eksekusi JavaScript di semua frame
+        result = await page.evaluate(_META_SCAN_JS)
+        if result:
+            data = json.loads(result) if isinstance(result, str) else result
+            return {
+                "thumb": data.get("thumb", ""),
+                "duration": data.get("duration", "")
+            }
+    except Exception as e:
+        log(f"⚠️ Collect page meta error: {e}")
+    return {}
 
 
 # ------------------------------------------------------------------ download
